@@ -5897,13 +5897,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self._startup_restore_tasks = tasks
                 tasks.append(task)
             scheduled += 1
-
         if scheduled:
             logger.info(
                 "Scheduled auto-resume for %d restart-interrupted session(s)",
                 scheduled,
             )
         return scheduled
+
+    def _startup_should_abort(self) -> bool:
+        return (
+            self._restart_requested
+            or self._draining
+            or self._shutdown_event.is_set()
+        )
+
+    async def _abort_startup_if_shutdown_requested(
+        self,
+        adapter: Optional[BasePlatformAdapter] = None,
+        platform: Optional[Platform] = None,
+    ) -> bool:
+        """Clean up and exit startup when restart/shutdown begins mid-startup."""
+        if not self._startup_should_abort():
+            return False
+        if adapter is not None and platform is not None:
+            try:
+                await adapter.cancel_background_tasks()
+            except Exception as e:
+                logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
+            await self._safe_adapter_disconnect(adapter, platform)
+        stop_task = self._stop_task
+        current_task = asyncio.current_task()
+        if stop_task is not None and stop_task is not current_task:
+            await stop_task
+        elif not self._shutdown_event.is_set():
+            await self.stop(
+                restart=self._restart_requested,
+                detached_restart=self._restart_detached,
+                service_restart=self._restart_via_service,
+            )
+        return True
 
     async def start(self) -> bool:
         """
@@ -6010,6 +6042,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "security advisory check failed at gateway startup",
                 exc_info=True,
             )
+        if await self._abort_startup_if_shutdown_requested():
+            return True
         
         # Warn if no user allowlists are configured and open access is not opted in
         _builtin_allowed_vars = (
@@ -6206,6 +6240,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # Initialize and connect each configured platform
         for platform, platform_config in self.config.platforms.items():
+            if await self._abort_startup_if_shutdown_requested():
+                return True
             if not platform_config.enabled:
                 continue
             enabled_platform_count += 1
@@ -6243,6 +6279,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             try:
                 success = await self._connect_adapter_with_timeout(adapter, platform)
+                if await self._abort_startup_if_shutdown_requested(adapter, platform):
+                    return True
                 if success:
                     self.adapters[platform] = adapter
                     self._sync_voice_mode_state_to_adapter(adapter)
@@ -6322,6 +6360,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "attempts": 1,
                     "next_retry": time.monotonic() + 30,
                 }
+            if await self._abort_startup_if_shutdown_requested():
+                return True
 
         # Multi-profile multiplexing: bring up adapters for every OTHER profile
         # this gateway serves. Each profile's adapters connect under that
@@ -6403,6 +6443,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.info("Gateway will continue running for cron job execution.")
         
         # Update delivery router with adapters
+        if await self._abort_startup_if_shutdown_requested():
+            return True
         self.delivery_router.adapters = self.adapters
         self._wire_teams_pipeline_runtime()
 
@@ -15106,6 +15148,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         metadata=_thread_metadata,
                         on_before_finalize=_pause_typing_before_finalize,
                         initial_reply_to_id=event_message_id,
+                        run_still_current=_run_still_current,
                     )
             except Exception as _sc_err:
                 logger.debug("Proxy: could not set up stream consumer: %s", _sc_err)
@@ -15382,6 +15425,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from agent.display import set_tool_preview_max_len
             _tpl = resolve_display_setting(user_config, platform_key, "tool_preview_length", 0)
             set_tool_preview_max_len(int(_tpl) if _tpl else 0)
+        except Exception:
+            pass
+
+        # Apply friendly tool labels config (default on) — per-platform aware
+        try:
+            from agent.display import set_friendly_tool_labels
+            _ftl = resolve_display_setting(user_config, platform_key, "friendly_tool_labels", True)
+            set_friendly_tool_labels(bool(_ftl))
         except Exception:
             pass
 
@@ -15678,12 +15729,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 msg = _code_block_short
                 last_was_terminal_block[0] = True
             elif preview:
-                from agent.display import get_tool_preview_max_len
+                from agent.display import (
+                    get_tool_preview_max_len,
+                    get_tool_verb,
+                    tool_verb_connector,
+                    verb_drops_preview,
+                )
                 _pl = get_tool_preview_max_len()
                 _cap = _pl if _pl > 0 else 40
                 if len(preview) > _cap:
                     preview = preview[:_cap - 3] + "..."
-                msg = f"{emoji} {tool_name}: \"{preview}\""
+                # Friendly labels: render a human-phrased line for built-in
+                # tools ("🔍 Searching the web for ...") by prefixing the verb
+                # onto the preview the callback already computed (so the
+                # command/url/query is preserved).  Custom/plugin/MCP tools
+                # have no verb and fall back to the raw "tool_name: ..." form.
+                _verb = get_tool_verb(tool_name)
+                if _verb:
+                    if verb_drops_preview(tool_name):
+                        msg = f"{emoji} {_verb}"
+                    else:
+                        msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{preview}"
+                else:
+                    msg = f"{emoji} {tool_name}: \"{preview}\""
                 last_was_terminal_block[0] = False
             else:
                 msg = f"{emoji} {tool_name}..."
@@ -16301,6 +16369,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             ),
                             on_before_finalize=_pause_typing_before_finalize,
                             initial_reply_to_id=event_message_id,
+                            run_still_current=_run_still_current,
                         )
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
@@ -18742,6 +18811,22 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         # Without this, the early `return True` below makes main() exit 0,
         # the finish script's `[ "$1" = "78" ]` check never matches, and
         # s6 crash-loops the gateway anyway (#51228).
+        if runner.exit_code is not None:
+            raise SystemExit(runner.exit_code)
+        return True
+    if not runner._running:
+        # Startup was intentionally aborted by restart/shutdown before entering
+        # running mode; preserve that lifecycle path without starting cron.
+        await runner.wait_for_shutdown()
+        if runner.should_exit_with_failure:
+            if runner.exit_reason:
+                logger.error("Gateway exiting with failure: %s", runner.exit_reason)
+            return False
+        try:
+            from tools.mcp_tool import shutdown_mcp_servers
+            shutdown_mcp_servers()
+        except Exception:
+            pass
         if runner.exit_code is not None:
             raise SystemExit(runner.exit_code)
         return True
