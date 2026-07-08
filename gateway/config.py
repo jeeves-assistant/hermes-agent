@@ -1223,6 +1223,23 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["gateway_restart_notification"] = platform_cfg["gateway_restart_notification"]
                 if "typing_indicator" in platform_cfg:
                     bridged["typing_indicator"] = platform_cfg["typing_indicator"]
+                # Generic platform extras that should work when users place
+                # them directly under ``platforms.<name>`` instead of nesting
+                # under ``extra``.  This keeps adapter-specific runtime knobs
+                # (for example email approval routing) from being silently
+                # dropped by PlatformConfig.from_dict().
+                for _extra_key in (
+                    "suppress_home_notice",
+                    "suppress_home_channel_notice",
+                    "response_delivery",
+                    "approval_discord_channel",
+                    "approval_discord_thread",
+                    "approval_discord_thread_id",
+                    "approval_policy_note",
+                    "skip_attachments",
+                ):
+                    if _extra_key in platform_cfg:
+                        bridged[_extra_key] = platform_cfg[_extra_key]
                 has_channel_overrides = "channel_overrides" in platform_cfg
                 if has_channel_overrides:
                     raw_overrides = platform_cfg.get("channel_overrides")
