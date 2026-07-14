@@ -393,13 +393,13 @@ class DeliveryRouter:
     ) -> Dict[str, Any]:
         """Deliver content to a messaging platform."""
         adapter = self.adapters.get(target.platform)
-        
+
         if not adapter:
             raise ValueError(f"No adapter configured for {target.platform.value}")
-        
+
         if not target.chat_id:
             raise ValueError(f"No chat ID for {target.platform.value} delivery")
-        
+
         # Guard: handle oversized cron output.
         #
         # Two independent decisions:
