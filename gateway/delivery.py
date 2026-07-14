@@ -471,7 +471,7 @@ class DeliveryRouter:
 
         if not target.chat_id:
             raise ValueError(f"No chat ID for {target.platform.value} delivery")
-        
+
         # Guard: handle oversized cron output.
         #
         # Two independent decisions:
