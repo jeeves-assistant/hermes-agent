@@ -25,10 +25,9 @@ from gateway.platforms.base import (BasePlatformAdapter, MessageEvent, MessageTy
                                     cache_document_from_bytes, cache_image_from_bytes)
 from gateway.config import Platform, PlatformConfig
 from utils import is_truthy_value
-from gateway.platforms._shared import (
-    get_scoped_secret as _get_secret, coerce_port, profile_scoped,
-)
+from gateway.platforms._shared import get_scoped_secret as _get_secret, coerce_port
 from gateway.session import SessionSource
+from agent.secret_scope import is_multiplex_active
 
 logger = logging.getLogger(__name__)
 
@@ -343,14 +342,14 @@ class EmailAdapter(BasePlatformAdapter):
         self._skip_attachments = extra.get("skip_attachments", False)  # platforms.email.skip_attachments
         if "response_delivery" in extra:
             response_delivery = extra.get("response_delivery")
-        elif profile_scoped():
+        elif is_multiplex_active():
             response_delivery = "email"
         else:
             response_delivery = _get_secret("EMAIL_RESPONSE_DELIVERY", "") or "email"
         self._response_delivery = str(response_delivery or "email").strip().lower()
         if "approval_discord_channel" in extra:
             approval_discord_channel = extra.get("approval_discord_channel")
-        elif profile_scoped():
+        elif is_multiplex_active():
             approval_discord_channel = ""
         else:
             approval_discord_channel = (
@@ -362,7 +361,7 @@ class EmailAdapter(BasePlatformAdapter):
             approval_discord_thread = extra.get("approval_discord_thread")
         elif "approval_discord_thread_id" in extra:
             approval_discord_thread = extra.get("approval_discord_thread_id")
-        elif profile_scoped():
+        elif is_multiplex_active():
             approval_discord_thread = ""
         else:
             approval_discord_thread = (
