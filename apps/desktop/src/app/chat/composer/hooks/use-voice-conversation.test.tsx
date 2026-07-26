@@ -175,6 +175,24 @@ describe('useVoiceConversation full-duplex barge-in', () => {
     expect(stopVoicePlayback).toHaveBeenCalled()
   })
 
+  it('interrupts the in-flight turn from the conversation stop control', async () => {
+    const { hook, onInterrupt } = renderConversation()
+
+    await act(async () => {
+      await hook.result.current.start()
+    })
+    await enterThinking(hook)
+
+    await act(async () => {
+      await hook.result.current.interruptResponse()
+    })
+
+    expect(onInterrupt).toHaveBeenCalledTimes(1)
+    expect(markVoicePlaybackInterrupted).toHaveBeenCalled()
+    expect(stopVoicePlayback).toHaveBeenCalled()
+    expect(hook.result.current.status).toBe('idle')
+  })
+
   it('submits the captured interruption once the interrupt settles (busy clears)', async () => {
     const { hook, onSubmit } = renderConversation({ transcript: 'no, do it differently' })
 
