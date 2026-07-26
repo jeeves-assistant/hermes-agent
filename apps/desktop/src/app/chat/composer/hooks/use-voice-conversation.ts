@@ -586,6 +586,31 @@ export function useVoiceConversation({
     }
   }, [handleTurn])
 
+  const interruptResponse = useCallback(async () => {
+    const currentStatus = statusRef.current
+    if (currentStatus !== 'speaking' && currentStatus !== 'thinking') {
+      return
+    }
+
+    markVoicePlaybackInterrupted()
+    stopVoicePlayback()
+    awaitingSpokenResponseRef.current = false
+    dropSpeechSession()
+    consumePendingResponse()
+
+    if (currentStatus === 'thinking' && busyRef.current) {
+      // Reuse the current upstream interruption seam (also used by automatic
+      // full-duplex barge-in) rather than the carry's obsolete onCancel prop.
+      await Promise.resolve(onInterruptRef.current?.())
+    }
+
+    if (enabledRef.current && !mutedRef.current) {
+      pendingStartRef.current = true
+    }
+
+    setStatus('idle')
+  }, [consumePendingResponse])
+
   const toggleMute = useCallback(() => {
     setMuted(value => {
       const next = !value
@@ -700,5 +725,5 @@ export function useVoiceConversation({
     wasEnabledRef.current = enabled
   }, [enabled, end, start])
 
-  return { end, level, muted, start, status, stopTurn, toggleMute }
+  return { end, interruptResponse, level, muted, start, status, stopTurn, toggleMute }
 }
