@@ -904,6 +904,7 @@ export function ChatBar({
         level: conversation.level,
         muted: conversation.muted,
         onEnd: endConversation,
+        onInterruptResponse: conversation.interruptResponse,
         onStart: startConversation,
         onStopTurn: conversation.stopTurn,
         onToggleMute: conversation.toggleMute,
