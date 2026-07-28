@@ -3188,6 +3188,79 @@ class TestSendViaAdapterStandaloneFallback:
         )
 
     @pytest.mark.asyncio
+    async def test_live_adapter_selection_honors_multiplex_session_profile(self, monkeypatch):
+        """A secondary turn must never send through the default live adapter."""
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.send_message_tool import _send_via_adapter
+
+        platform = Platform("email")
+        primary = SimpleNamespace(send=AsyncMock())
+        secondary = SimpleNamespace(
+            send=AsyncMock(
+                return_value=SimpleNamespace(
+                    success=True,
+                    message_id="secondary-id",
+                    error=None,
+                )
+            )
+        )
+        runner = SimpleNamespace(
+            adapters={platform: primary},
+            _authorization_adapter=lambda requested, profile=None: (
+                secondary if requested == platform and profile == "secondary" else None
+            ),
+        )
+        fake_gateway_run = ModuleType("gateway.run")
+        setattr(fake_gateway_run, "_gateway_runner_ref", lambda: runner)
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_gateway_run)
+
+        tokens = set_session_vars(profile="secondary")
+        try:
+            result = await _send_via_adapter(
+                platform,
+                SimpleNamespace(extra={}),
+                "target@example.com",
+                "secondary message",
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        assert result == {"success": True, "message_id": "secondary-id"}
+        secondary.send.assert_awaited_once()
+        primary.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_scoped_live_adapter_fails_closed(self, monkeypatch):
+        """Do not fall back to a default adapter or standalone config for a scoped turn."""
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.send_message_tool import _send_via_adapter
+
+        platform = _FakePlatform("fakeplatform")
+        primary = SimpleNamespace(send=AsyncMock())
+        runner = SimpleNamespace(
+            adapters={platform: primary},
+            _authorization_adapter=lambda requested, profile=None: None,
+        )
+        fake_gateway_run = ModuleType("gateway.run")
+        setattr(fake_gateway_run, "_gateway_runner_ref", lambda: runner)
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_gateway_run)
+
+        tokens = set_session_vars(profile="secondary")
+        try:
+            result = await _send_via_adapter(
+                platform,
+                SimpleNamespace(extra={}),
+                "room-1",
+                "must not leak",
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        assert "error" in result
+        assert "secondary" in result["error"]
+        primary.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_live_ntfy_adapter_receives_explicit_publish_topic(self, monkeypatch):
         from tools.send_message_tool import _send_via_adapter
 

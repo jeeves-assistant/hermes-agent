@@ -13,6 +13,7 @@ import re
 import ssl
 import time
 from email.utils import formatdate
+from typing import Any
 
 from agent.redact import redact_sensitive_text
 from agent.secret_scope import get_secret
@@ -709,8 +710,20 @@ async def _send_via_adapter(
         runner = None
 
     if runner is not None:
+        from gateway.session_context import get_session_env
+
+        profile_name = get_session_env("HERMES_SESSION_PROFILE", "").strip()
+        adapter: Any = None
         try:
-            adapter = runner.adapters.get(platform)
+            resolver = getattr(runner, "_authorization_adapter", None)
+            if callable(resolver):
+                adapter = resolver(platform, profile_name or None)
+            elif profile_name:
+                # A session-stamped profile without a profile-aware resolver
+                # must not borrow the process/default adapter map.
+                adapter = None
+            else:
+                adapter = runner.adapters.get(platform)
         except Exception:
             adapter = None
         if adapter is not None:
@@ -730,6 +743,13 @@ async def _send_via_adapter(
             if result.success:
                 return {"success": True, "message_id": result.message_id}
             return {"error": f"Adapter send failed: {result.error}"}
+        if profile_name:
+            return {
+                "error": (
+                    f"No live adapter for platform '{platform_name}' in profile "
+                    f"'{profile_name}'. Refusing to fall back across profile boundaries."
+                )
+            }
 
     entry = None
     try:

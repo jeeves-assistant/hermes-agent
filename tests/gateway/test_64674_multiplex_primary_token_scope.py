@@ -119,6 +119,56 @@ class TestPlatformHasBotCredential:
 
 
 class TestPrimaryStartupSkipsEmptyTokenUnderMultiplex:
+    def test_default_adapter_creation_runs_in_default_profile_scope(self, tmp_path, monkeypatch):
+        """Primary adapter constructors must see the default profile's own secrets."""
+        from agent.secret_scope import get_secret, set_multiplex_active
+        from gateway import run as run_mod
+
+        home = tmp_path / "default-home"
+        home.mkdir()
+        (home / ".env").write_text("EMAIL_PASSWORD=default-profile-password\n")
+        monkeypatch.setattr(run_mod, "get_hermes_home", lambda: home)
+        monkeypatch.setenv("EMAIL_PASSWORD", "process-global-password")
+        set_multiplex_active(True)
+
+        runner = run_mod.GatewayRunner.__new__(run_mod.GatewayRunner)
+        runner.config = GatewayConfig(multiplex_profiles=True)
+        runner._create_adapter = lambda platform, config: get_secret("EMAIL_PASSWORD")
+
+        observed = runner._create_default_profile_adapter(
+            Platform.EMAIL, PlatformConfig(enabled=True)
+        )
+        assert observed == "default-profile-password"
+
+    @pytest.mark.asyncio
+    async def test_default_adapter_connect_runs_in_default_profile_scope(self, tmp_path, monkeypatch):
+        """Tasks spawned by primary connect inherit the default profile scope."""
+        import asyncio
+        from agent.secret_scope import get_secret, set_multiplex_active
+        from gateway import run as run_mod
+
+        home = tmp_path / "default-home"
+        home.mkdir()
+        (home / ".env").write_text("EMAIL_PASSWORD=default-profile-password\n")
+        monkeypatch.setattr(run_mod, "get_hermes_home", lambda: home)
+        monkeypatch.setenv("EMAIL_PASSWORD", "process-global-password")
+        set_multiplex_active(True)
+
+        runner = run_mod.GatewayRunner.__new__(run_mod.GatewayRunner)
+        runner.config = GatewayConfig(multiplex_profiles=True)
+
+        async def fake_connect(adapter, platform, *, is_reconnect=False):
+            async def spawned():
+                return get_secret("EMAIL_PASSWORD")
+
+            return await asyncio.create_task(spawned())
+
+        runner._connect_adapter_with_timeout = fake_connect
+        observed = await runner._connect_default_profile_adapter(
+            object(), Platform.EMAIL, is_reconnect=True
+        )
+        assert observed == "default-profile-password"
+
     @pytest.mark.asyncio
     async def test_skips_empty_telegram_when_multiplex_on(self, monkeypatch):
         from gateway.run import GatewayRunner
