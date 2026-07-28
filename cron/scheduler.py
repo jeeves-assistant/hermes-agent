@@ -1121,7 +1121,12 @@ def cron_delivery_targets() -> list[dict]:
     return targets
 
 
-def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
+def _resolve_single_delivery_target(
+    job: dict,
+    deliver_value: str,
+    *,
+    profile_name: Optional[str] = None,
+) -> Optional[dict]:
     """Resolve one concrete auto-delivery target for a cron job."""
 
     origin = _resolve_origin(job)
@@ -1166,9 +1171,16 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
             chat_id, thread_id = rest, None
 
         # Resolve human-friendly labels like "Alice (dm)" to real IDs.
+        from agent.secret_scope import is_multiplex_active
+        if not is_explicit and is_multiplex_active() and not profile_name:
+            raise RuntimeError(
+                "Multiplex cron friendly-name resolution has no profile owner"
+            )
         try:
             from gateway.channel_directory import resolve_channel_name
-            resolved = resolve_channel_name(platform_key, chat_id)
+            resolved = resolve_channel_name(
+                platform_key, chat_id, profile_name=profile_name
+            )
             if resolved:
                 parsed_chat_id, parsed_thread_id, resolved_is_explicit = _parse_target_ref(platform_key, resolved)
                 if resolved_is_explicit:
@@ -1292,8 +1304,31 @@ def _resolve_delivery_targets(job: dict) -> List[dict]:
 
     seen = set()
     targets = []
+    profile_name = None
+    from agent.secret_scope import is_multiplex_active
+
+    if is_multiplex_active():
+        from gateway.channel_directory import profile_name_for_home
+        from gateway.session_context import get_session_env
+        from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+        stamped = (
+            get_session_env("HERMES_CRON_PROFILE", "").strip()
+            or get_session_env("HERMES_SESSION_PROFILE", "").strip()
+        )
+        if not stamped:
+            raise RuntimeError("Multiplex cron delivery has no profile owner")
+        profile_name = normalize_profile_name(stamped)
+        validate_profile_name(profile_name)
+        scoped_owner = profile_name_for_home(_get_hermes_home())
+        if scoped_owner != profile_name:
+            raise RuntimeError(
+                "Multiplex cron profile owner does not match scoped Hermes home"
+            )
     for part in parts:
-        target = _resolve_single_delivery_target(job, part)
+        target = _resolve_single_delivery_target(
+            job, part, profile_name=profile_name
+        )
         if target:
             key = (target["platform"].lower(), str(target["chat_id"]), target.get("thread_id"))
             if key not in seen:

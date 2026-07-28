@@ -329,7 +329,9 @@ class TestResolveDeliveryTarget:
             return_value="12345678901234@lid",
         ) as resolve_mock:
             result = _resolve_delivery_target(job)
-        resolve_mock.assert_called_once_with("whatsapp", "Alice (dm)")
+        resolve_mock.assert_called_once_with(
+            "whatsapp", "Alice (dm)", profile_name=None
+        )
         assert result == {
             "platform": "whatsapp",
             "chat_id": "12345678901234@lid",

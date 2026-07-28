@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
@@ -36,25 +37,94 @@ _slack_directory_warning_last: Dict[tuple[str, str], float] = {}
 CHANNEL_ALIASES_PATH = get_hermes_home() / "channel_aliases.json"
 
 
-def _load_channel_aliases() -> Dict[str, Dict[str, str]]:
-    if not CHANNEL_ALIASES_PATH.exists():
+def _normalize_profile_name(profile_name: Optional[str]) -> Optional[str]:
+    if not profile_name or not str(profile_name).strip():
+        return None
+    from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+    normalized = normalize_profile_name(str(profile_name))
+    validate_profile_name(normalized)
+    return normalized
+
+
+def _profile_home(profile_name: Optional[str], profile_home: Optional[Path] = None) -> Optional[Path]:
+    """Return a profile's runtime home without changing process-global state."""
+    if profile_home is not None:
+        return Path(profile_home)
+    normalized = _normalize_profile_name(profile_name)
+    if normalized is None:
+        return None
+    from hermes_cli.profiles import get_profile_dir
+    return get_profile_dir(normalized)
+
+
+def profile_name_for_home(profile_home: Optional[Path] = None) -> Optional[str]:
+    """Resolve a runtime home back to its canonical profile owner."""
+    from hermes_cli.profiles import (
+        get_profile_dir,
+        normalize_profile_name,
+        validate_profile_name,
+    )
+
+    current = Path(profile_home or get_hermes_home()).expanduser().resolve()
+    default_home = get_profile_dir("default").expanduser().resolve()
+    if current == default_home:
+        return "default"
+    profiles_root = (default_home / "profiles").resolve()
+    if current.parent == profiles_root:
+        try:
+            normalized = normalize_profile_name(current.name)
+            validate_profile_name(normalized)
+            return normalized
+        except ValueError:
+            return None
+    return None
+
+
+def _directory_path(profile_name: Optional[str], profile_home: Optional[Path] = None) -> Path:
+    home = _profile_home(profile_name, profile_home)
+    return home / "channel_directory.json" if home is not None else DIRECTORY_PATH
+
+
+def _aliases_path(profile_name: Optional[str], profile_home: Optional[Path] = None) -> Path:
+    home = _profile_home(profile_name, profile_home)
+    return home / "channel_aliases.json" if home is not None else CHANNEL_ALIASES_PATH
+
+
+def _empty_directory(profile_name: Optional[str] = None) -> Dict[str, Any]:
+    directory: Dict[str, Any] = {"updated_at": None, "platforms": {}}
+    normalized = _normalize_profile_name(profile_name)
+    if normalized is not None:
+        directory["profile"] = normalized
+    return directory
+
+
+def _load_channel_aliases(
+    profile_name: Optional[str] = None,
+    profile_home: Optional[Path] = None,
+) -> Dict[str, Dict[str, str]]:
+    aliases_path = _aliases_path(profile_name, profile_home)
+    if not aliases_path.exists():
         return {}
     try:
-        with open(CHANNEL_ALIASES_PATH, encoding="utf-8") as f:
+        with open(aliases_path, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
-def _apply_channel_aliases(platforms: Dict[str, Any]) -> None:
+def _apply_channel_aliases(
+    platforms: Dict[str, Any],
+    profile_name: Optional[str] = None,
+    profile_home: Optional[Path] = None,
+) -> None:
     """Overlay friendly names onto directory entries by chat_id.
 
     Renames matching entries in place; injects a placeholder entry for an
     aliased id that hasn't been discovered yet (so a freshly-created group is
     addressable by name before its first message). Mutates *platforms*.
     """
-    aliases = _load_channel_aliases()
+    aliases = _load_channel_aliases(profile_name, profile_home)
     for plat_name, id_map in aliases.items():
         if not isinstance(id_map, dict):
             continue
@@ -139,22 +209,34 @@ def _warn_slack_directory(team_id: str, detail: str) -> None:
 # Build / refresh
 # ---------------------------------------------------------------------------
 
-async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
-    """
-    Build a channel directory from connected platform adapters and session data.
-
-    Returns the directory dict and writes it to DIRECTORY_PATH.
-    """
+async def build_channel_directory(
+    adapters: Dict[Any, Any],
+    *,
+    profile_name: Optional[str] = None,
+    profile_home: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Build one profile-owned channel directory from adapters and sessions."""
     from gateway.config import Platform
 
+    normalized_profile = _normalize_profile_name(profile_name)
+    resolved_home = _profile_home(normalized_profile, profile_home)
     platforms: Dict[str, List[Dict[str, str]]] = {}
 
     for platform, adapter in adapters.items():
         try:
             if platform == Platform.DISCORD:
-                platforms["discord"] = await asyncio.to_thread(_build_discord, adapter)
+                if resolved_home is None:
+                    platforms["discord"] = await asyncio.to_thread(_build_discord, adapter)
+                else:
+                    platforms["discord"] = await asyncio.to_thread(
+                        _build_discord, adapter, resolved_home
+                    )
             elif platform == Platform.SLACK:
-                platforms["slack"] = await _build_slack(adapter)
+                platforms["slack"] = (
+                    await _build_slack(adapter)
+                    if resolved_home is None
+                    else await _build_slack(adapter, resolved_home)
+                )
         except Exception as e:
             logger.warning("Channel directory: failed to build %s: %s", platform.value, e)
 
@@ -173,7 +255,12 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
             or plat_name not in adapter_platform_names
         ):
             continue
-        platforms[plat_name] = await asyncio.to_thread(_build_from_sessions, plat_name)
+        if resolved_home is None:
+            platforms[plat_name] = await asyncio.to_thread(_build_from_sessions, plat_name)
+        else:
+            platforms[plat_name] = await asyncio.to_thread(
+                _build_from_sessions, plat_name, resolved_home
+            )
 
     # Include plugin-registered platforms (dynamic enum members aren't in
     # Platform.__members__, so the loop above misses them). Same
@@ -187,27 +274,60 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
                 and entry.name not in platforms
                 and entry.name in adapter_platform_names
             ):
-                platforms[entry.name] = await asyncio.to_thread(_build_from_sessions, entry.name)
+                if resolved_home is None:
+                    platforms[entry.name] = await asyncio.to_thread(
+                        _build_from_sessions, entry.name
+                    )
+                else:
+                    platforms[entry.name] = await asyncio.to_thread(
+                        _build_from_sessions, entry.name, resolved_home
+                    )
     except Exception:
         pass
 
     # Overlay user-maintained friendly names before persisting.
-    _apply_channel_aliases(platforms)
+    _apply_channel_aliases(platforms, normalized_profile, resolved_home)
 
-    directory = {
+    directory: Dict[str, Any] = {
         "updated_at": datetime.now().isoformat(),
         "platforms": platforms,
     }
+    if normalized_profile is not None:
+        directory["profile"] = normalized_profile
 
     try:
-        atomic_json_write(DIRECTORY_PATH, directory)
+        atomic_json_write(_directory_path(normalized_profile, resolved_home), directory)
     except Exception as e:
         logger.warning("Channel directory: failed to write: %s", e)
 
     return directory
 
 
-def _build_discord(adapter) -> List[Dict[str, str]]:
+async def build_channel_directories(
+    adapters: Dict[Any, Any],
+    *,
+    profile_adapters: Optional[Dict[str, Dict[Any, Any]]] = None,
+    active_profile: Optional[str] = None,
+    multiplex: bool = False,
+) -> Dict[Optional[str], Dict[str, Any]]:
+    """Build every directory owned by a gateway process."""
+    if not multiplex:
+        return {None: await build_channel_directory(adapters)}
+
+    active = _normalize_profile_name(active_profile) or "default"
+    results: Dict[Optional[str], Dict[str, Any]] = {}
+    results[active] = await build_channel_directory(adapters, profile_name=active)
+    for profile, owned_adapters in sorted((profile_adapters or {}).items()):
+        normalized = _normalize_profile_name(profile)
+        if normalized is None or normalized == active:
+            continue
+        results[normalized] = await build_channel_directory(
+            owned_adapters, profile_name=normalized
+        )
+    return results
+
+
+def _build_discord(adapter, profile_home: Optional[Path] = None) -> List[Dict[str, str]]:
     """Enumerate all text channels and forum channels the Discord bot can see."""
     channels = []
     client = getattr(adapter, "_client", None)
@@ -240,7 +360,11 @@ def _build_discord(adapter) -> List[Dict[str, str]]:
         # feasible via guild enumeration; those come from sessions.
 
     # Merge any DMs from session history
-    channels.extend(_build_from_sessions("discord"))
+    channels.extend(
+        _build_from_sessions("discord")
+        if profile_home is None
+        else _build_from_sessions("discord", profile_home)
+    )
     return channels
 
 
@@ -259,7 +383,7 @@ def _slack_api_error_code(error: Exception) -> Optional[str]:
     return None
 
 
-async def _build_slack(adapter) -> List[Dict[str, Any]]:
+async def _build_slack(adapter, profile_home: Optional[Path] = None) -> List[Dict[str, Any]]:
     """List Slack channels the bot has joined across all workspaces.
 
     Uses ``users.conversations`` against each workspace's web client. Pulls
@@ -270,7 +394,9 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
     """
     team_clients = getattr(adapter, "_team_clients", None) or {}
     if not team_clients:
-        return await asyncio.to_thread(_build_from_sessions, "slack")
+        if profile_home is None:
+            return await asyncio.to_thread(_build_from_sessions, "slack")
+        return await asyncio.to_thread(_build_from_sessions, "slack", profile_home)
 
     channels: List[Dict[str, Any]] = []
     seen_ids: set = set()
@@ -324,7 +450,12 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
     # Build a lookup from API-discovered channels so we can enrich session entries.
     api_name_lookup = {ch["id"]: ch["name"] for ch in channels}
 
-    for entry in await asyncio.to_thread(_build_from_sessions, "slack"):
+    session_entries = (
+        await asyncio.to_thread(_build_from_sessions, "slack")
+        if profile_home is None
+        else await asyncio.to_thread(_build_from_sessions, "slack", profile_home)
+    )
+    for entry in session_entries:
         eid = entry.get("id")
         if eid not in seen_ids:
             # If the entry name is still a raw Slack ID (e.g. C0xxx / D0xxx),
@@ -368,24 +499,28 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
     return channels
 
 
-def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
+def _build_from_sessions(
+    platform_name: str, profile_home: Optional[Path] = None
+) -> List[Dict[str, str]]:
     """Pull known channels/contacts from gateway session origin data.
 
     state.db is the primary source (#9006): gateway session rows persist
     origin_json.  Falls back to sessions.json for pre-migration databases.
     """
-    entries = _build_from_sessions_db(platform_name)
+    entries = _build_from_sessions_db(platform_name, profile_home)
     if entries:
         return entries
-    return _build_from_sessions_json(platform_name)
+    return _build_from_sessions_json(platform_name, profile_home)
 
 
-def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
+def _build_from_sessions_db(
+    platform_name: str, profile_home: Optional[Path] = None
+) -> List[Dict[str, str]]:
     """Pull channels/contacts from state.db gateway session rows."""
     entries: List[Dict[str, str]] = []
     try:
         from hermes_state import SessionDB
-        db = SessionDB()
+        db = SessionDB(db_path=Path(profile_home) / "state.db" if profile_home else None)
         try:
             lister = getattr(db, "list_gateway_sessions", None)
             if not callable(lister):
@@ -428,9 +563,12 @@ def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
     return entries
 
 
-def _build_from_sessions_json(platform_name: str) -> List[Dict[str, str]]:
+def _build_from_sessions_json(
+    platform_name: str, profile_home: Optional[Path] = None
+) -> List[Dict[str, str]]:
     """Legacy fallback: pull channels/contacts from sessions.json origin data."""
-    sessions_path = get_hermes_home() / "sessions" / "sessions.json"
+    home = Path(profile_home) if profile_home else get_hermes_home()
+    sessions_path = home / "sessions" / "sessions.json"
     if not sessions_path.exists():
         return []
 
@@ -468,35 +606,50 @@ def _build_from_sessions_json(platform_name: str) -> List[Dict[str, str]]:
 # Read / resolve
 # ---------------------------------------------------------------------------
 
-def load_directory() -> Dict[str, Any]:
-    """Load the cached channel directory from disk."""
-    if not DIRECTORY_PATH.exists():
-        base = {"updated_at": None, "platforms": {}}
-        _apply_channel_aliases(base["platforms"])
+def load_directory(
+    profile_name: Optional[str] = None,
+    *,
+    profile_home: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Load one cached directory, enforcing ownership for profile-aware reads."""
+    normalized_profile = _normalize_profile_name(profile_name)
+    resolved_home = _profile_home(normalized_profile, profile_home)
+    directory_path = _directory_path(normalized_profile, resolved_home)
+    if not directory_path.exists():
+        base = _empty_directory(normalized_profile)
+        _apply_channel_aliases(base["platforms"], normalized_profile, resolved_home)
         return base
     try:
-        with open(DIRECTORY_PATH, encoding="utf-8") as f:
+        with open(directory_path, encoding="utf-8") as f:
             data = json.load(f)
-        # Re-apply aliases on read so friendly names take effect immediately,
-        # even between timed rebuilds and for brand-new alias entries.
-        _apply_channel_aliases(data.setdefault("platforms", {}))
+        # Named-profile readers must never trust legacy/unowned or misplaced
+        # files. Single-profile callers omit profile_name and retain compatibility.
+        if normalized_profile is not None and data.get("profile") != normalized_profile:
+            return _empty_directory(normalized_profile)
+        _apply_channel_aliases(
+            data.setdefault("platforms", {}), normalized_profile, resolved_home
+        )
         return data
     except Exception:
-        base = {"updated_at": None, "platforms": {}}
-        _apply_channel_aliases(base["platforms"])
+        base = _empty_directory(normalized_profile)
+        _apply_channel_aliases(base["platforms"], normalized_profile, resolved_home)
         return base
 
 
-def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:
-    """Return the channel ``type`` string (e.g. ``"channel"``, ``"forum"``) for *chat_id*, or *None* if unknown."""
-    directory = load_directory()
+def lookup_channel_type(
+    platform_name: str, chat_id: str, profile_name: Optional[str] = None
+) -> Optional[str]:
+    """Return the channel type for a target in the selected profile."""
+    directory = load_directory(profile_name)
     for ch in directory.get("platforms", {}).get(platform_name, []):
         if ch.get("id") == chat_id:
             return ch.get("type")
     return None
 
 
-def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
+def resolve_channel_name(
+    platform_name: str, name: str, profile_name: Optional[str] = None
+) -> Optional[str]:
     """
     Resolve a human-friendly channel name to a numeric ID.
 
@@ -505,7 +658,7 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
     - Telegram: display name or group name
     - Slack: "engineering", "#engineering"
     """
-    directory = load_directory()
+    directory = load_directory(profile_name)
     channels = directory.get("platforms", {}).get(platform_name, [])
     if not channels:
         return None
@@ -543,9 +696,9 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
     return None
 
 
-def format_directory_for_display() -> str:
-    """Format the channel directory as a human-readable list for the model."""
-    directory = load_directory()
+def format_directory_for_display(profile_name: Optional[str] = None) -> str:
+    """Format one profile's channel directory as a human-readable list."""
+    directory = load_directory(profile_name)
     platforms = directory.get("platforms", {})
 
     if not any(platforms.values()):

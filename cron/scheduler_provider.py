@@ -319,8 +319,14 @@ class InProcessCronScheduler(CronScheduler):
                     logger.debug("Cron dispatch paused while gateway drains existing work")
                 else:
                     for entry in profile_homes:
+                        profile_name = entry[0] if isinstance(entry, tuple) else ""
                         home = entry[1] if isinstance(entry, tuple) else entry
                         home_token = set_hermes_home_override(str(home))
+                        from gateway.session_context import (
+                            reset_cron_profile,
+                            set_cron_profile,
+                        )
+                        profile_token = set_cron_profile(profile_name)
                         try:
                             with use_cron_store(home):
                                 cron_tick(
@@ -331,6 +337,7 @@ class InProcessCronScheduler(CronScheduler):
                                     can_dispatch=can_dispatch,
                                 )
                         finally:
+                            reset_cron_profile(profile_token)
                             reset_hermes_home_override(home_token)
                 ok = True
             except BaseException as e:

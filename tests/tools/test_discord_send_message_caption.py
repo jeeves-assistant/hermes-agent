@@ -131,3 +131,40 @@ def test_no_caption_non_forum_keeps_separate_text():
         assert calls[1][0].endswith("/messages")
     finally:
         os.unlink(img)
+
+
+def test_standalone_channel_type_lookup_uses_session_profile():
+    chat_id = "999000333"
+    session_ctx, _calls = _session_with([_resp(200, {"id": "m1"})])
+    lookup = MagicMock(return_value="channel")
+    from gateway.session_context import _SESSION_PROFILE
+
+    token = _SESSION_PROFILE.set("beta")
+    try:
+        with patch("aiohttp.ClientSession", return_value=session_ctx), \
+             patch("agent.secret_scope.is_multiplex_active", return_value=True), \
+             patch("gateway.channel_directory.lookup_channel_type", lookup):
+            result = asyncio.run(
+                _standalone_send(_pconfig(), chat_id, "hello")
+            )
+    finally:
+        _SESSION_PROFILE.reset(token)
+
+    assert result["success"] is True
+    lookup.assert_called_once_with(
+        "discord", chat_id, profile_name="beta"
+    )
+
+
+def test_single_profile_standalone_lookup_preserves_legacy_directory():
+    chat_id = "999000334"
+    session_ctx, _calls = _session_with([_resp(200, {"id": "m1"})])
+    lookup = MagicMock(return_value="channel")
+
+    with patch("aiohttp.ClientSession", return_value=session_ctx), \
+         patch("agent.secret_scope.is_multiplex_active", return_value=False), \
+         patch("gateway.channel_directory.lookup_channel_type", lookup):
+        result = asyncio.run(_standalone_send(_pconfig(), chat_id, "hello"))
+
+    assert result["success"] is True
+    lookup.assert_called_once_with("discord", chat_id, profile_name=None)

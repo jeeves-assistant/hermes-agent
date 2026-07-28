@@ -119,6 +119,10 @@ _SESSION_ASYNC_DELIVERY: ContextVar = ContextVar("HERMES_SESSION_ASYNC_DELIVERY"
 _CRON_AUTO_DELIVER_PLATFORM: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
 _CRON_AUTO_DELIVER_CHAT_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
+# Trusted scheduler-owned profile identity for multiplex cron ticks. This is
+# deliberately separate from HERMES_SESSION_PROFILE: run_job clears inbound
+# session state before agent execution, but delivery must retain its owner.
+_CRON_PROFILE: ContextVar = ContextVar("HERMES_CRON_PROFILE", default=_UNSET)
 
 _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
@@ -137,7 +141,18 @@ _VAR_MAP = {
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
+    "HERMES_CRON_PROFILE": _CRON_PROFILE,
 }
+
+
+def set_cron_profile(profile: str):
+    """Bind the trusted multiplex cron owner for the current tick."""
+    return _CRON_PROFILE.set(profile)
+
+
+def reset_cron_profile(token) -> None:
+    """Restore the previous multiplex cron owner."""
+    _CRON_PROFILE.reset(token)
 
 
 def set_current_session_id(session_id: str) -> None:

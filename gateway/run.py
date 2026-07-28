@@ -8666,11 +8666,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
         
-        # Build initial channel directory for send_message name resolution
+        # Build one owned directory per served profile for send_message name resolution.
         try:
-            from gateway.channel_directory import build_channel_directory
-            directory = await build_channel_directory(self.adapters)
-            ch_count = sum(len(chs) for chs in directory.get("platforms", {}).values())
+            from gateway.channel_directory import build_channel_directories
+            directories = await build_channel_directories(
+                self.adapters,
+                profile_adapters=self._profile_adapters,
+                active_profile=self._active_profile_name(),
+                multiplex=bool(getattr(self.config, "multiplex_profiles", False)),
+            )
+            ch_count = sum(
+                len(chs)
+                for directory in directories.values()
+                for chs in directory.get("platforms", {}).values()
+            )
             logger.info("Channel directory built: %d target(s)", ch_count)
         except Exception as e:
             logger.warning("Channel directory build failed: %s", e)
@@ -9506,10 +9515,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         logger.info("✓ %s reconnected successfully", platform.value)
 
-                        # Rebuild channel directory with the new adapter
+                        # Rebuild every owned directory with the current adapter maps.
                         try:
-                            from gateway.channel_directory import build_channel_directory
-                            await build_channel_directory(self.adapters)
+                            from gateway.channel_directory import build_channel_directories
+                            await build_channel_directories(
+                                self.adapters,
+                                profile_adapters=self._profile_adapters,
+                                active_profile=self._active_profile_name(),
+                                multiplex=bool(getattr(self.config, "multiplex_profiles", False)),
+                            )
                         except Exception:
                             pass
 
@@ -10424,6 +10438,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if platform not in profile_map:
                             profile_map[platform] = adapter
                             self._sync_voice_mode_state_to_adapter(adapter)
+                            try:
+                                from gateway.channel_directory import build_channel_directory
+                                await build_channel_directory(
+                                    profile_map, profile_name=profile_name
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "secondary channel-directory refresh failed (profile: %s)",
+                                    profile_name,
+                                    exc_info=True,
+                                )
                             logger.info(
                                 "✓ %s reconnected (profile: %s)",
                                 platform.value,
@@ -23986,7 +24011,16 @@ def _run_planned_stop_watcher(
         stop_event.wait(poll_interval)
 
 
-def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
+def _start_gateway_housekeeping(
+    stop_event: threading.Event,
+    adapters=None,
+    loop=None,
+    interval: int = 60,
+    *,
+    profile_adapters=None,
+    active_profile=None,
+    multiplex: bool = False,
+):
     """Background thread for gateway-only periodic chores (NOT cron).
 
     Split out of the historical ``_start_cron_ticker`` so the cron *trigger*
@@ -24014,16 +24048,24 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
     while not stop_event.is_set():
         tick_count += 1
 
-        if tick_count % CHANNEL_DIR_EVERY == 0 and adapters:
+        has_owned_adapters = bool(adapters) or (
+            multiplex and any(bool(owned) for owned in (profile_adapters or {}).values())
+        )
+        if tick_count % CHANNEL_DIR_EVERY == 0 and has_owned_adapters:
             try:
-                from gateway.channel_directory import build_channel_directory
+                from gateway.channel_directory import build_channel_directories
                 if loop is not None:
                     # build_channel_directory is async (Slack web calls), and
                     # this runs in a background thread. Schedule onto the
                     # gateway event loop and wait briefly for completion so
                     # refresh failures are still logged via the except.
                     fut = safe_schedule_threadsafe(
-                        build_channel_directory(adapters), loop,
+                        build_channel_directories(
+                            adapters or {},
+                            profile_adapters=profile_adapters,
+                            active_profile=active_profile,
+                            multiplex=multiplex,
+                        ), loop,
                         logger=logger,
                         log_message="Channel directory refresh scheduling error",
                     )
@@ -24704,7 +24746,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     housekeeping_thread = threading.Thread(
         target=_start_gateway_housekeeping,
         args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+        kwargs={
+            "adapters": runner.adapters,
+            "loop": asyncio.get_running_loop(),
+            "profile_adapters": runner._profile_adapters,
+            "active_profile": runner._active_profile_name(),
+            "multiplex": bool(getattr(runner.config, "multiplex_profiles", False)),
+        },
         daemon=True,
         name="gateway-housekeeping",
     )

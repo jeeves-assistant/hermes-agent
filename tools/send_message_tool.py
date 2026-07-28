@@ -45,6 +45,11 @@ _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # downstream adapters (signal, etc.) expect.
 _PHONE_PLATFORMS = frozenset({"photon", "signal", "sms", "whatsapp"})
 _E164_TARGET_RE = re.compile(r"^\s*\+(\d{7,15})\s*$")
+# Photon emits exact BlueBubbles space forms: E.164 DMs or opaque group IDs.
+# Keep this deliberately narrow so friendly labels cannot masquerade as IDs.
+_PHOTON_CHAT_GUID_RE = re.compile(
+    r"^\s*any;(?:-;\+\d{6,15}|\+;[A-Za-z0-9][A-Za-z0-9._:-]{0,255})\s*$"
+)
 # WhatsApp JIDs: group chats (<digits>@g.us), individual users
 # (<phone>@s.whatsapp.net), linked identities (<id>@lid), and broadcast /
 # newsletter chats. These are explicit native targets the bridge accepts
@@ -255,11 +260,74 @@ def send_message_tool(args, **kw):
     return _handle_send(args)
 
 
+def _channel_directory_profile() -> str | None:
+    """Return a validated, served directory owner; fail closed in multiplex."""
+    from gateway.session_context import get_session_env
+    from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+    try:
+        from gateway.run import _gateway_runner_ref
+        runner = _gateway_runner_ref()
+    except Exception:
+        runner = None
+
+    raw_owner = (
+        get_session_env("HERMES_SESSION_PROFILE", "").strip()
+        or get_session_env("HERMES_CRON_PROFILE", "").strip()
+    )
+    owner = None
+    if raw_owner:
+        try:
+            owner = normalize_profile_name(raw_owner)
+            validate_profile_name(owner)
+        except ValueError as exc:
+            raise RuntimeError("Invalid multiplex profile ownership stamp") from exc
+
+    multiplex = bool(
+        runner is not None
+        and getattr(getattr(runner, "config", None), "multiplex_profiles", False)
+    )
+    if not multiplex:
+        from agent.secret_scope import is_multiplex_active
+
+        if is_multiplex_active():
+            raise RuntimeError(
+                "Multiplex directory lookup has no live served-profile registry"
+            )
+        return owner
+
+    active_profile = getattr(runner, "_active_profile_name", None)
+    try:
+        active_owner = normalize_profile_name(
+            str(active_profile() if callable(active_profile) else "")
+        )
+        validate_profile_name(active_owner)
+    except ValueError as exc:
+        raise RuntimeError("Multiplex session has no trustworthy profile owner") from exc
+
+    served = {active_owner}
+    for candidate in getattr(runner, "_profile_adapters", {}) or {}:
+        try:
+            normalized = normalize_profile_name(str(candidate))
+            validate_profile_name(normalized)
+            served.add(normalized)
+        except ValueError:
+            continue
+
+    owner = owner or active_owner
+    if owner not in served:
+        raise RuntimeError(
+            f"Profile '{owner}' is not served by this multiplex gateway"
+        )
+    return owner
+
+
 def _handle_list():
     """Return formatted list of available messaging targets."""
     try:
         from gateway.channel_directory import format_directory_for_display
-        return json.dumps({"targets": format_directory_for_display()})
+        profile_name = _channel_directory_profile()
+        return json.dumps({"targets": format_directory_for_display(profile_name)})
     except Exception as e:
         return json.dumps(_error(f"Failed to load channel directory: {e}"))
 
@@ -274,6 +342,11 @@ def _handle_react(args, remove=False):
     process — there is no standalone fallback, since reacting needs the
     adapter's live message-id state.
     """
+    try:
+        profile_name = _channel_directory_profile()
+    except Exception as e:
+        return tool_error(str(e))
+
     target = args.get("target", "")
     emoji = (args.get("emoji") or "").strip()
     message_id = (args.get("message_id") or "").strip() or None
@@ -293,12 +366,19 @@ def _handle_react(args, remove=False):
         if not chat_id:
             try:
                 from gateway.channel_directory import resolve_channel_name
-                resolved = resolve_channel_name(platform_name, target_ref)
+                resolved = resolve_channel_name(
+                    platform_name, target_ref, profile_name=profile_name
+                )
             except Exception:
                 resolved = None
             # Opaque platform-native ids (e.g. photon space GUIDs like
             # 'any;-;+1555...') match no parser pattern and no directory
-            # entry — pass them through verbatim; the adapter validates.
+            # entry — pass them through verbatim only for legacy unstamped calls.
+            if profile_name and not resolved:
+                return tool_error(
+                    f"Could not resolve '{target_ref}' on {platform_name} for profile "
+                    f"'{profile_name}'. Refusing an unowned reaction target."
+                )
             chat_id = resolved or target_ref
 
     try:
@@ -326,7 +406,18 @@ def _handle_react(args, remove=False):
         runner = _gateway_runner_ref()
     except Exception:
         runner = None
-    adapter = runner.adapters.get(platform) if runner is not None else None
+    adapter = None
+    if runner is not None:
+        try:
+            resolver = getattr(runner, "_authorization_adapter", None)
+            if callable(resolver):
+                adapter = resolver(platform, profile_name)
+            elif profile_name:
+                adapter = None
+            else:
+                adapter = runner.adapters.get(platform)
+        except Exception:
+            adapter = None
     if adapter is None:
         return tool_error(
             f"Reactions require a live {platform_name} adapter in the running "
@@ -358,6 +449,11 @@ def _handle_react(args, remove=False):
 
 def _handle_send(args):
     """Send a message to a platform target."""
+    try:
+        profile_name = _channel_directory_profile()
+    except Exception as e:
+        return tool_error(str(e))
+
     target = args.get("target", "")
     message = args.get("message", "")
     if not target or not message:
@@ -378,7 +474,9 @@ def _handle_send(args):
     if target_ref and not is_explicit:
         try:
             from gateway.channel_directory import resolve_channel_name
-            resolved = resolve_channel_name(platform_name, target_ref)
+            resolved = resolve_channel_name(
+                platform_name, target_ref, profile_name=profile_name
+            )
             if resolved:
                 chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
             else:
@@ -599,6 +697,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
             return f"group:{group_id}", None, True
         return None, None, False
     if platform_name in _PHONE_PLATFORMS:
+        if platform_name == "photon" and _PHOTON_CHAT_GUID_RE.fullmatch(target_ref):
+            return target_ref.strip(), None, True
         match = _E164_TARGET_RE.fullmatch(target_ref)
         if match:
             # Preserve the leading '+' — signal-cli and sms/whatsapp adapters
@@ -710,9 +810,7 @@ async def _send_via_adapter(
         runner = None
 
     if runner is not None:
-        from gateway.session_context import get_session_env
-
-        profile_name = get_session_env("HERMES_SESSION_PROFILE", "").strip()
+        profile_name = _channel_directory_profile() or ""
         adapter: Any = None
         try:
             resolver = getattr(runner, "_authorization_adapter", None)
