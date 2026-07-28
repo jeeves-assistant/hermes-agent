@@ -9131,26 +9131,22 @@ async def _standalone_send(
             # Three-layer detection: directory cache → process-local probe
             # cache → GET /channels/{id} probe (with result memoized).
             _channel_type = None
-            try:
-                from gateway.channel_directory import lookup_channel_type
-                from gateway.session_context import get_session_env
-                from agent.secret_scope import is_multiplex_active
+            from gateway.channel_directory import (
+                lookup_channel_type,
+                require_served_profile_owner,
+            )
+            from gateway.session_context import get_session_env
+            from agent.secret_scope import is_multiplex_active
 
-                directory_owner = None
-                if is_multiplex_active():
-                    directory_owner = (
-                        get_session_env("HERMES_SESSION_PROFILE", "").strip()
-                        or get_session_env("HERMES_CRON_PROFILE", "").strip()
-                    )
-                    if not directory_owner:
-                        raise RuntimeError(
-                            "Multiplex Discord standalone lookup has no profile owner"
-                        )
-                _channel_type = lookup_channel_type(
-                    "discord", chat_id, profile_name=directory_owner
+            directory_owner = None
+            if is_multiplex_active():
+                directory_owner = require_served_profile_owner(
+                    get_session_env("HERMES_SESSION_PROFILE", "").strip()
+                    or get_session_env("HERMES_CRON_PROFILE", "").strip()
                 )
-            except Exception:
-                pass
+            _channel_type = lookup_channel_type(
+                "discord", chat_id, profile_name=directory_owner
+            )
 
             if _channel_type == "forum":
                 is_forum = True

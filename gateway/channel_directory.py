@@ -48,13 +48,44 @@ def _normalize_profile_name(profile_name: Optional[str]) -> Optional[str]:
 
 def _profile_home(profile_name: Optional[str], profile_home: Optional[Path] = None) -> Optional[Path]:
     """Return a profile's runtime home without changing process-global state."""
-    if profile_home is not None:
-        return Path(profile_home)
     normalized = _normalize_profile_name(profile_name)
+    if profile_home is not None:
+        from hermes_cli.profiles import get_profile_dir
+
+        expected = (
+            get_profile_dir(normalized)
+            if normalized is not None
+            else get_hermes_home()
+        ).expanduser().resolve()
+        supplied = Path(profile_home).expanduser().resolve()
+        if supplied != expected:
+            raise ValueError(
+                "profile_home does not match the canonical profile owner"
+            )
+        return supplied
     if normalized is None:
         return None
     from hermes_cli.profiles import get_profile_dir
     return get_profile_dir(normalized)
+
+
+def require_served_profile_owner(profile_name: Optional[str]) -> str:
+    """Canonicalize an owner and prove it belongs to this multiplex gateway."""
+    normalized = _normalize_profile_name(profile_name)
+    if normalized is None:
+        raise RuntimeError("Multiplex directory lookup has no profile owner")
+
+    from hermes_cli.profiles import profiles_to_serve
+
+    served = {
+        _normalize_profile_name(name)
+        for name, _home in profiles_to_serve(multiplex=True)
+    }
+    if normalized not in served:
+        raise RuntimeError(
+            f"Profile '{normalized}' is not served by this multiplex gateway"
+        )
+    return normalized
 
 
 def profile_name_for_home(profile_home: Optional[Path] = None) -> Optional[str]:
@@ -613,6 +644,9 @@ def load_directory(
 ) -> Dict[str, Any]:
     """Load one cached directory, enforcing ownership for profile-aware reads."""
     normalized_profile = _normalize_profile_name(profile_name)
+    from agent.secret_scope import is_multiplex_active
+    if is_multiplex_active():
+        normalized_profile = require_served_profile_owner(normalized_profile)
     resolved_home = _profile_home(normalized_profile, profile_home)
     directory_path = _directory_path(normalized_profile, resolved_home)
     if not directory_path.exists():

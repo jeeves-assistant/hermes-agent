@@ -182,6 +182,8 @@ class InProcessCronScheduler(CronScheduler):
         interval=60,
         can_dispatch=None,
         profile_homes=None,
+        profile_adapters=None,
+        active_profile=None,
     ):
         import logging
         from cron.scheduler import tick as cron_tick
@@ -209,6 +211,8 @@ class InProcessCronScheduler(CronScheduler):
                 loop=loop,
                 interval=interval,
                 can_dispatch=can_dispatch,
+                profile_adapters=profile_adapters,
+                active_profile=active_profile,
             )
             return
 
@@ -269,6 +273,8 @@ class InProcessCronScheduler(CronScheduler):
         loop=None,
         interval=60,
         can_dispatch=None,
+        profile_adapters=None,
+        active_profile=None,
     ):
         """Tick every served profile's cron store when multiplex_profiles is on.
 
@@ -321,6 +327,11 @@ class InProcessCronScheduler(CronScheduler):
                     for entry in profile_homes:
                         profile_name = entry[0] if isinstance(entry, tuple) else ""
                         home = entry[1] if isinstance(entry, tuple) else entry
+                        owned_adapters = (
+                            adapters
+                            if profile_name == active_profile
+                            else (profile_adapters or {}).get(profile_name)
+                        )
                         home_token = set_hermes_home_override(str(home))
                         from gateway.session_context import (
                             reset_cron_profile,
@@ -331,7 +342,7 @@ class InProcessCronScheduler(CronScheduler):
                             with use_cron_store(home):
                                 cron_tick(
                                     verbose=False,
-                                    adapters=adapters,
+                                    adapters=owned_adapters,
                                     loop=loop,
                                     sync=False,
                                     can_dispatch=can_dispatch,

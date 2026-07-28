@@ -1172,25 +1172,32 @@ def _resolve_single_delivery_target(
 
         # Resolve human-friendly labels like "Alice (dm)" to real IDs.
         from agent.secret_scope import is_multiplex_active
-        if not is_explicit and is_multiplex_active() and not profile_name:
+        multiplex = is_multiplex_active()
+        if not is_explicit and multiplex and not profile_name:
             raise RuntimeError(
                 "Multiplex cron friendly-name resolution has no profile owner"
             )
+        from gateway.channel_directory import resolve_channel_name
         try:
-            from gateway.channel_directory import resolve_channel_name
             resolved = resolve_channel_name(
                 platform_key, chat_id, profile_name=profile_name
             )
-            if resolved:
-                parsed_chat_id, parsed_thread_id, resolved_is_explicit = _parse_target_ref(platform_key, resolved)
-                if resolved_is_explicit:
-                    chat_id = parsed_chat_id
-                    if parsed_thread_id is not None:
-                        thread_id = parsed_thread_id
-                else:
-                    chat_id = resolved
         except Exception:
-            pass
+            if multiplex and not is_explicit:
+                raise
+            resolved = None
+        if resolved:
+            parsed_chat_id, parsed_thread_id, resolved_is_explicit = _parse_target_ref(platform_key, resolved)
+            if resolved_is_explicit:
+                chat_id = parsed_chat_id
+                if parsed_thread_id is not None:
+                    thread_id = parsed_thread_id
+            else:
+                chat_id = resolved
+        elif multiplex and not is_explicit:
+            raise RuntimeError(
+                f"Multiplex cron target '{deliver_value}' did not resolve in profile '{profile_name}'"
+            )
 
         if (
             thread_id is None

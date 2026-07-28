@@ -160,6 +160,35 @@ def test_directory_api_rejects_out_of_root_profile_names(profile_name):
         load_directory(profile_name)
 
 
+def test_directory_api_rejects_mismatched_profile_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(ValueError, match="does not match the canonical profile"):
+        load_directory("beta", profile_home=outside)
+
+
+def test_directory_api_rejects_valid_unserved_profile_in_multiplex(
+    tmp_path, monkeypatch
+):
+    from agent.secret_scope import is_multiplex_active, set_multiplex_active
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profiles_to_serve",
+        lambda multiplex: [
+            ("default", tmp_path),
+            ("beta", tmp_path / "profiles/beta"),
+        ],
+    )
+    prior = is_multiplex_active()
+    set_multiplex_active(True)
+    try:
+        with pytest.raises(RuntimeError, match="not served"):
+            load_directory("alpha")
+    finally:
+        set_multiplex_active(prior)
+
+
 def test_valid_but_unserved_profile_stamp_fails_closed():
     from gateway.session_context import _SESSION_PROFILE
 
@@ -376,6 +405,10 @@ def test_multiplex_cron_uses_trusted_profile_and_matching_home(tmp_path, monkeyp
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     beta_home = tmp_path / "profiles" / "beta"
     beta_home.mkdir(parents=True)
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profiles_to_serve",
+        lambda multiplex: [("default", tmp_path), ("beta", beta_home)],
+    )
     (beta_home / "channel_directory.json").write_text(json.dumps({
         "profile": "beta",
         "updated_at": "now",
