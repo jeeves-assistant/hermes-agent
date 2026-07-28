@@ -237,6 +237,38 @@ class TestEmailResponseDelivery(unittest.TestCase):
         self.assertEqual(result.message_id, "email-message-id")
         adapter.send.assert_awaited_once()
 
+    def test_discord_response_delivery_suppresses_automatic_media_email(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(
+                enabled=True,
+                extra={"response_delivery": "discord", "approval_discord_channel": "12345"},
+            ))
+
+        self.assertFalse(adapter._allow_final_response_media_delivery())
+
+    def test_default_response_delivery_keeps_automatic_media_email_enabled(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_RESPONSE_DELIVERY": "",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        self.assertTrue(adapter._allow_final_response_media_delivery())
+
     def test_email_discord_delivery_suppresses_home_channel_notice(self):
         from gateway.run import _suppress_home_channel_notice
 

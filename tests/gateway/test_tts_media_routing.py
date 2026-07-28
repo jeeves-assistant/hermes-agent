@@ -63,6 +63,26 @@ def _allowed_media_path(tmp_path, monkeypatch, name):
 
 
 @pytest.mark.asyncio
+async def test_base_adapter_suppresses_media_when_input_only_redirect_opts_out(tmp_path, monkeypatch):
+    adapter = _MediaRoutingAdapter()
+    event = _event()
+    media_file = _allowed_media_path(tmp_path, monkeypatch, "private.txt")
+    adapter._message_handler = AsyncMock(
+        return_value=f"Approval details\nMEDIA:{media_file}"
+    )
+    adapter._allow_final_response_media_delivery = lambda: False
+    adapter.send_document = AsyncMock(
+        return_value=SendResult(success=True, message_id="doc")
+    )
+    adapter.send_multiple_images = AsyncMock()
+
+    await adapter._process_message_background(event, build_session_key(event.source))
+
+    adapter.send_document.assert_not_awaited()
+    adapter.send_multiple_images.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_base_adapter_routes_voice_tagged_telegram_ogg_media_tag_to_voice_sender(tmp_path, monkeypatch):
     adapter = _MediaRoutingAdapter()
     event = _event()
