@@ -3,12 +3,14 @@ import logging
 import asyncio
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 import gateway.run as gateway_run
 from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.platforms.base import BasePlatformAdapter
 from gateway.run import GatewayRunner
 
 
@@ -170,6 +172,7 @@ class _SecondaryRecoveryAdapter:
     platform = Platform.DISCORD
 
     def __init__(self, *, retryable=True):
+        self._gateway_profile = None
         self.fatal_error_retryable = retryable
         self.fatal_error_code = "transport_stale" if retryable else "auth_failed"
         self.fatal_error_message = "Gateway transport stale"
@@ -213,6 +216,17 @@ def _secondary_recovery_runner(*, running=True):
     runner._adapter_disconnect_timeout_secs = lambda: 0
     runner._sync_voice_mode_state_to_adapter = lambda adapter: None
     return runner
+
+
+def test_profile_adapter_configuration_stamps_transport_profile():
+    runner = _secondary_recovery_runner()
+    adapter = _SecondaryRecoveryAdapter()
+
+    runner._configure_profile_adapter(
+        cast(BasePlatformAdapter, adapter), "reviewer", Platform.DISCORD
+    )
+
+    assert adapter._gateway_profile == "reviewer"
 
 
 def _install_secondary_reconnect_context(monkeypatch, runner, adapter, scoped_homes=None):

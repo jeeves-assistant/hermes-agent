@@ -10545,6 +10545,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform: Platform,
     ) -> None:
         """Install the profile-scoped handlers shared by startup and reconnect."""
+        # Preserve transport provenance for adapter-initiated cross-platform
+        # delivery (for example, a secondary profile's email approval routed
+        # to that same profile's Discord adapter).  Without this stamp, the
+        # resolver sees an unstamped request and may use the active profile's
+        # bot/channel instead.
+        adapter._gateway_profile = profile_name
         adapter.set_message_handler(self._make_profile_message_handler(profile_name))
         adapter.set_fatal_error_handler(
             self._make_profile_fatal_error_handler(profile_name, platform)
