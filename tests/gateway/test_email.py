@@ -191,6 +191,88 @@ class TestEmailResponseDelivery(unittest.TestCase):
         )
         adapter._send_email.assert_not_called()
 
+    def test_discord_response_delivery_resolves_same_multiplex_profile(self):
+        from gateway.config import Platform, PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+            discord_adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        adapter._gateway_profile = "reviewer"
+        resolver = MagicMock(return_value=discord_adapter)
+        setattr(
+            adapter,
+            "gateway_runner",
+            SimpleNamespace(
+                _authorization_adapter=resolver,
+                adapters={Platform.DISCORD: object()},
+            ),
+        )
+
+        self.assertIs(adapter._discord_delivery_adapter(), discord_adapter)
+        resolver.assert_called_once_with(Platform.DISCORD, "reviewer")
+
+    def test_discord_response_delivery_does_not_fallback_across_profiles(self):
+        from gateway.config import Platform, PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+            active_discord_adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        adapter._gateway_profile = "reviewer"
+        resolver = MagicMock(return_value=None)
+        setattr(
+            adapter,
+            "gateway_runner",
+            SimpleNamespace(
+                _authorization_adapter=resolver,
+                adapters={Platform.DISCORD: active_discord_adapter},
+            ),
+        )
+
+        self.assertIsNone(adapter._discord_delivery_adapter())
+        resolver.assert_called_once_with(Platform.DISCORD, "reviewer")
+
+    def test_stamped_discord_delivery_rejects_legacy_unscoped_resolver(self):
+        from gateway.config import Platform, PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+            active_discord_adapter = EmailAdapter(PlatformConfig(enabled=True))
+
+        adapter._gateway_profile = "reviewer"
+        legacy_resolver = MagicMock(return_value=active_discord_adapter)
+        legacy_resolver.side_effect = lambda platform: active_discord_adapter
+        setattr(
+            adapter,
+            "gateway_runner",
+            SimpleNamespace(
+                _authorization_adapter=legacy_resolver,
+                adapters={Platform.DISCORD: active_discord_adapter},
+            ),
+        )
+
+        self.assertIsNone(adapter._discord_delivery_adapter())
+        legacy_resolver.assert_called_once_with(Platform.DISCORD, "reviewer")
+
     def test_discord_response_delivery_leaves_non_final_notices_on_email_path(self):
         import asyncio
         from gateway.config import PlatformConfig
