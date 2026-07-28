@@ -1011,7 +1011,7 @@ class EmailAdapter(BasePlatformAdapter):
         resolver = getattr(runner, "_authorization_adapter", None)
         if callable(resolver):
             try:
-                adapter = resolver(Platform.DISCORD, getattr(self.config, "profile", None))
+                adapter = resolver(Platform.DISCORD, self._gateway_profile)
             except TypeError:
                 adapter = resolver(Platform.DISCORD)
             except Exception:
