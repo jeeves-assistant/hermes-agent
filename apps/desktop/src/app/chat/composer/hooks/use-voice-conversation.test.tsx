@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { BargeMonitorCallbacks } from '@/lib/voice-barge-in'
 
-import type { MicRecording } from './use-mic-recorder'
+import type { MicRecorderOptions, MicRecording } from './use-mic-recorder'
 import { useVoiceConversation } from './use-voice-conversation'
 
 // The full-duplex contract: the barge monitor is live across the WHOLE agent
@@ -41,7 +41,7 @@ vi.mock('@/lib/thinking-sound', () => ({
 
 const micHandle = {
   cancel: vi.fn(),
-  start: vi.fn(async () => undefined),
+  start: vi.fn<(options?: MicRecorderOptions) => Promise<void>>(async () => undefined),
   stop: vi.fn<() => Promise<MicRecording | null>>(async () => null)
 }
 
@@ -280,5 +280,74 @@ describe('useVoiceConversation full-duplex barge-in', () => {
     hook.rerender({ busy: true })
 
     expect(monitorCalls.length).toBe(armed)
+  })
+
+  it('halts a busy backend turn when interrupted from speaking state', async () => {
+    const onInterrupt = vi.fn().mockResolvedValue(undefined)
+    const consumePendingResponse = vi.fn()
+    micHandle.stop.mockResolvedValueOnce({
+      audio: new Blob(['q'], { type: 'audio/webm' }),
+      durationMs: 900,
+      heardSpeech: true
+    })
+    const { result, rerender } = renderHook(
+      ({ busy }) =>
+        useVoiceConversation({
+          busy,
+          consumePendingResponse,
+          enabled: true,
+          onInterrupt,
+          onSubmit: vi.fn().mockResolvedValue(undefined),
+          onTranscribeAudio: vi.fn().mockResolvedValue('interrupt test'),
+          pendingResponse: () => ({
+            id: 'assistant-1',
+            pending: true,
+            text: 'partial assistant words'
+          })
+        }),
+      { initialProps: { busy: false } }
+    )
+
+    await act(async () => {
+      await result.current.start()
+    })
+    const startOptions = micHandle.start.mock.calls.at(-1)?.[0]
+    expect(startOptions?.onSilence).toBeTypeOf('function')
+    await act(async () => {
+      startOptions?.onSilence?.()
+    })
+    await waitFor(() => expect(result.current.status).toBe('speaking'))
+
+    rerender({ busy: true })
+    await act(async () => {
+      await result.current.interruptResponse()
+    })
+
+    expect(onInterrupt).toHaveBeenCalledTimes(1)
+    expect(stopVoicePlayback).toHaveBeenCalled()
+    expect(consumePendingResponse).toHaveBeenCalled()
+    expect(result.current.status).toBe('idle')
+  })
+
+  it('halts a busy backend turn when the conversation ends', async () => {
+    const onInterrupt = vi.fn().mockResolvedValue(undefined)
+    const { result } = renderHook(() =>
+      useVoiceConversation({
+        busy: true,
+        consumePendingResponse: vi.fn(),
+        enabled: true,
+        onInterrupt,
+        onSubmit: vi.fn().mockResolvedValue(undefined),
+        onTranscribeAudio: vi.fn().mockResolvedValue('end test'),
+        pendingResponse: () => null
+      })
+    )
+
+    await act(async () => {
+      await result.current.end()
+    })
+
+    expect(onInterrupt).toHaveBeenCalledTimes(1)
+    expect(result.current.status).toBe('idle')
   })
 })

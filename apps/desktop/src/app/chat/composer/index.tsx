@@ -886,7 +886,7 @@ export function ChatBar({
     focusInput,
     insertText,
     maxRecordingSeconds,
-    // Voice barge-in mid-generation halts the run like the Stop button.
+    // Voice interruption and shutdown halt the run like the Stop button.
     onInterrupt: haltRun,
     onSubmit,
     onTranscribeAudio,

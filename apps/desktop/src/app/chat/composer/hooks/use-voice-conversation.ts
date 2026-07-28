@@ -578,6 +578,13 @@ export function useVoiceConversation({
     consumePendingResponse()
     setMuted(false)
     setStatus('idle')
+
+    if (busyRef.current) {
+      // Ending or disabling voice is an explicit halt, not just local audio
+      // cleanup. Reuse the full-duplex interruption seam so queued work is
+      // parked consistently with the Stop button.
+      await Promise.resolve(onInterruptRef.current?.())
+    }
   }, [consumePendingResponse, handle])
 
   const stopTurn = useCallback(() => {
@@ -598,9 +605,9 @@ export function useVoiceConversation({
     dropSpeechSession()
     consumePendingResponse()
 
-    if (currentStatus === 'thinking' && busyRef.current) {
-      // Reuse the current upstream interruption seam (also used by automatic
-      // full-duplex barge-in) rather than the carry's obsolete onCancel prop.
+    if (busyRef.current) {
+      // Playback may start while generation is still active. Halt whenever
+      // the backend is busy, through the same seam as full-duplex barge-in.
       await Promise.resolve(onInterruptRef.current?.())
     }
 
