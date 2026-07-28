@@ -834,7 +834,9 @@ export function ChatBar({
     focusInput,
     insertText,
     maxRecordingSeconds,
-    onCancel,
+    // Voice Stop/interruption is an explicit halt too: park queued work before
+    // cancelling so settle cannot immediately auto-drain the next prompt.
+    onCancel: haltRun,
     onSubmit,
     onTranscribeAudio,
     sessionId,
