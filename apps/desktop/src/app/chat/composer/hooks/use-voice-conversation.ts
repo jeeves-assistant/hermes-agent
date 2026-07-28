@@ -548,7 +548,7 @@ export function useVoiceConversation({
     dropSpeechSession()
     consumePendingResponse()
 
-    if (currentStatus === 'thinking' && busyRef.current) {
+    if (busyRef.current) {
       await Promise.resolve(onCancel?.())
     }
 
