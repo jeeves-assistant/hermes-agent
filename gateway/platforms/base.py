@@ -2592,6 +2592,10 @@ class BasePlatformAdapter(ABC):
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
+        # Multiplexed secondary adapters are stamped by GatewayRunner so
+        # cross-platform delivery can resolve the matching profile transport
+        # instead of silently falling back to the active profile's adapter.
+        self._gateway_profile: Optional[str] = None
         self._message_handler: Optional[MessageHandler] = None
         # Optional gateway-supplied fan-out for platform-native emoji
         # reaction events (see ``set_reaction_handler``).
