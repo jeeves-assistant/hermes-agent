@@ -68,6 +68,83 @@ class TestConfigEnvOverrides(unittest.TestCase):
             _apply_env_overrides(config)
         self.assertNotIn(Platform.EMAIL, config.platforms)
 
+class TestMultiplexScopedEmailAdapter(unittest.TestCase):
+    """Email adapter reads must honor the active multiplex profile scope."""
+
+    def tearDown(self):
+        from agent.secret_scope import set_multiplex_active
+
+        set_multiplex_active(False)
+
+    def test_constructor_and_sender_policy_use_profile_scope(self):
+        from agent.secret_scope import (
+            reset_secret_scope,
+            set_multiplex_active,
+            set_secret_scope,
+        )
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import (
+            EmailAdapter,
+            check_email_requirements,
+        )
+
+        primary = {
+            "EMAIL_ADDRESS": "primary@example.com",
+            "EMAIL_PASSWORD": "primary-password",
+            "EMAIL_IMAP_HOST": "imap.primary.example",
+            "EMAIL_SMTP_HOST": "smtp.primary.example",
+            "EMAIL_ALLOWED_USERS": "primary-sender@example.com",
+            "DISCORD_HOME_CHANNEL": "primary-channel",
+        }
+        secondary = {
+            "EMAIL_ADDRESS": "secondary@example.com",
+            "EMAIL_PASSWORD": "secondary-password",
+            "EMAIL_IMAP_HOST": "imap.secondary.example",
+            "EMAIL_IMAP_PORT": "1993",
+            "EMAIL_SMTP_HOST": "smtp.secondary.example",
+            "EMAIL_SMTP_PORT": "1465",
+            "EMAIL_POLL_INTERVAL": "27",
+            "EMAIL_ALLOWED_USERS": "secondary-sender@example.com",
+            "EMAIL_RESPONSE_DELIVERY": "discord",
+            "DISCORD_HOME_CHANNEL": "secondary-channel",
+        }
+
+        set_multiplex_active(True)
+        token = set_secret_scope(secondary)
+        try:
+            with patch.dict(os.environ, primary, clear=True):
+                adapter = EmailAdapter(PlatformConfig(enabled=True))
+                self.assertTrue(check_email_requirements())
+                self.assertEqual(adapter._address, "secondary@example.com")
+                self.assertEqual(adapter._password, "secondary-password")
+                self.assertEqual(adapter._imap_host, "imap.secondary.example")
+                self.assertEqual(adapter._imap_port, 1993)
+                self.assertEqual(adapter._smtp_host, "smtp.secondary.example")
+                self.assertEqual(adapter._smtp_port, 1465)
+                self.assertEqual(adapter._poll_interval, 27)
+                self.assertEqual(adapter._response_delivery, "discord")
+                self.assertEqual(adapter._approval_discord_channel, "secondary-channel")
+                self.assertTrue(adapter._allowlist_in_effect())
+                self.assertFalse(adapter._allow_all_senders())
+        finally:
+            reset_secret_scope(token)
+
+    def test_unscoped_constructor_fails_closed_in_multiplex_mode(self):
+        from agent.secret_scope import UnscopedSecretError, set_multiplex_active
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        set_multiplex_active(True)
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "primary@example.com",
+            "EMAIL_PASSWORD": "primary-password",
+            "EMAIL_IMAP_HOST": "imap.primary.example",
+            "EMAIL_SMTP_HOST": "smtp.primary.example",
+        }, clear=True):
+            with self.assertRaises(UnscopedSecretError):
+                EmailAdapter(PlatformConfig(enabled=True))
+
+
 class TestCheckRequirements(unittest.TestCase):
     """Verify check_email_requirements function."""
 
