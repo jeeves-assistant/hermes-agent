@@ -4626,6 +4626,15 @@ class BasePlatformAdapter(ABC):
         """
         return True
 
+    def _allow_final_response_delivery_ledger(self) -> bool:
+        """Whether this source adapter may persist final-response obligations.
+
+        Redirecting input-only adapters cannot safely record their source
+        address as the recovery destination. They opt out until the ledger can
+        represent the actual routed destination.
+        """
+        return True
+
     async def _send_final_response_with_retry(
         self,
         chat_id: str,
@@ -5565,7 +5574,8 @@ class BasePlatformAdapter(ABC):
                 # an explicit ``/voice on|tts`` opt-in OR when ``voice.auto_tts`` is
                 # True globally and no ``/voice off`` has been issued.
                 _tts_path = None
-                if (self._should_auto_tts_for_chat(event.source.chat_id)
+                if (self._allow_final_response_media_delivery()
+                        and self._should_auto_tts_for_chat(event.source.chat_id)
                         and event.message_type == MessageType.VOICE
                         and text_content
                         and not media_files):
@@ -5643,7 +5653,10 @@ class BasePlatformAdapter(ABC):
                                 record_obligation,
                             )
 
-                            if ledger_enabled():
+                            if (
+                                ledger_enabled()
+                                and self._allow_final_response_delivery_ledger()
+                            ):
                                 _obligation_id = compute_obligation_id(
                                     session_key,
                                     str(getattr(event, "message_id", "") or ""),
