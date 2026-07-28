@@ -1053,16 +1053,27 @@ class EmailAdapter(BasePlatformAdapter):
             return None
 
         adapter = None
+        profile_name = (self._gateway_profile or "").strip() or None
         resolver = getattr(runner, "_authorization_adapter", None)
         if callable(resolver):
             try:
-                adapter = resolver(Platform.DISCORD, getattr(self.config, "profile", None))
+                adapter = resolver(Platform.DISCORD, profile_name)
             except TypeError:
+                if profile_name is not None:
+                    # A legacy resolver cannot honor explicit profile
+                    # provenance. Fail closed instead of falling back to the
+                    # active profile's Discord transport.
+                    return None
                 adapter = resolver(Platform.DISCORD)
             except Exception:
                 logger.debug("[Email] Failed to resolve Discord adapter from gateway runner", exc_info=True)
 
         if adapter is None:
+            if profile_name is not None:
+                # The profile-aware resolver intentionally returns None when
+                # that profile has no connected Discord adapter. Falling back
+                # here would cross profile/credential boundaries.
+                return None
             adapters = getattr(runner, "adapters", None) or {}
             adapter = adapters.get(Platform.DISCORD)
 
