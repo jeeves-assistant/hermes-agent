@@ -1022,6 +1022,20 @@ class EmailAdapter(BasePlatformAdapter):
             )
         return result
 
+    def _allow_final_response_media_delivery(self) -> bool:
+        """Never let redirected automatic replies send attachments by email.
+
+        The base final-response pipeline otherwise calls this adapter's media
+        methods after the text redirect. Those methods remain available for an
+        explicit approved outbound email, but are unsafe for approval-first
+        intake responses because they target the inbound sender via SMTP.
+        """
+        return self._response_delivery not in {
+            "discord",
+            "discord_home",
+            "approval_discord",
+        }
+
     def _discord_delivery_adapter(self) -> Optional[BasePlatformAdapter]:
         """Resolve the active Discord adapter for email-intake final replies."""
 
