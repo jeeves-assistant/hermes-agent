@@ -5039,6 +5039,16 @@ class BasePlatformAdapter(ABC):
             return self
         return live_adapter
 
+    def _allow_final_response_media_delivery(self) -> bool:
+        """Whether extracted final-response media may use this source adapter.
+
+        Input-only adapters can redirect the text final response through a
+        narrow delivery seam while their ordinary media methods still target
+        the inbound source. They must opt out here so generated attachments
+        cannot bypass that redirect and leak back through the source transport.
+        """
+        return True
+
     async def _send_final_response_with_retry(
         self,
         chat_id: str,
@@ -5950,6 +5960,20 @@ class BasePlatformAdapter(ABC):
                         local_files = [p for p in local_files if p not in _history_media_paths]
                     if local_files:
                         logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
+
+                if (
+                    (images or local_files or media_files)
+                    and not self._allow_final_response_media_delivery()
+                ):
+                    logger.warning(
+                        "[%s] Suppressing %d extracted final-response attachment(s) "
+                        "because this input-only adapter redirects automatic replies",
+                        self.name,
+                        len(images) + len(local_files) + len(media_files),
+                    )
+                    images = []
+                    local_files = []
+                    media_files = []
 
                 # A2 (#29346): extraction can reduce a non-empty response to
                 # empty text with no attachment, and the `if text_content` guard
