@@ -174,16 +174,24 @@ def _large_refactor_signals(title: str, body: str) -> list[str]:
     """Return deterministic reasons this card must be decomposed first."""
     text = f"{title or ''}\n{body or ''}"
     signals: list[str] = []
-    file_refs = _FILE_REFERENCE_RE.findall(text)
+    # Count distinct paths, not mentions. A stack trace or review note may
+    # repeat one filename many times without describing a broad refactor.
+    file_refs = {
+        match.group(0).strip(" \t\r\n`'\"").lower()
+        for match in _FILE_REFERENCE_RE.finditer(text)
+    }
     token_estimate = _estimate_tokens(text)
     keyword_hits = sorted({m.group(1).lower() for m in _LARGE_REFACTOR_KEYWORD_RE.finditer(text)})
     has_broad_file_scope = len(file_refs) > _LARGE_REFACTOR_FILE_THRESHOLD
     has_large_prompt = token_estimate > _LARGE_REFACTOR_TOKEN_THRESHOLD
-    if not (has_broad_file_scope or has_large_prompt):
+    # Breadth alone is not refactor intent: reviews, traces, and inventories can
+    # legitimately name many files while remaining one coherent task.
+    if not keyword_hits or not (has_broad_file_scope or has_large_prompt):
         return signals
     # "move" by itself is common in ordinary task prose (for example, moving a
-    # meeting or memory). Treat it as a large-refactor signal only when paired
-    # with a genuine breadth signal.
+    # meeting or memory). Require distinct-file breadth for that ambiguous verb.
+    if keyword_hits == ["move"] and not has_broad_file_scope:
+        return signals
     high_confidence_keywords = [kw for kw in keyword_hits if kw != "move"]
     if "move" in keyword_hits:
         high_confidence_keywords.append("move")
