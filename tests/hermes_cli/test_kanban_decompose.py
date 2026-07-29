@@ -218,6 +218,18 @@ def test_large_refactor_guard_preserves_narrow_singleton_refactors(kanban_home):
     assert task.status == "ready"
 
 
+def test_large_refactor_guard_counts_distinct_file_references():
+    repeated_trace = "\n".join(["Traceback at src/one.py"] * 12)
+
+    assert decomp._large_refactor_signals("Refactor one crash", repeated_trace) == []
+
+
+def test_large_refactor_guard_requires_refactor_intent_for_broad_file_lists():
+    file_list = "\n".join(f"src/package/module_{i}.py" for i in range(10))
+
+    assert decomp._large_refactor_signals("Review implementation plan", file_list) == []
+
+
 def test_large_refactor_guard_rejects_broad_single_task_collapse(kanban_home):
     file_list = "\n".join(f"src/package/module_{i}.py" for i in range(10))
     with kb.connect() as conn:
