@@ -46,9 +46,47 @@ from gateway.platforms.base import (
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource
 from agent.secret_scope import is_multiplex_active
-from utils import env_int, env_bool
+
 
 logger = logging.getLogger(__name__)
+
+
+def _email_config_value(
+    config: PlatformConfig,
+    env_name: str,
+    *,
+    extra_key: Optional[str] = None,
+    default: str = "",
+) -> str:
+    """Resolve one email setting without crossing multiplex profile scopes."""
+    runtime_env = getattr(config, "_runtime_env", {}) or {}
+    if env_name in runtime_env:
+        return str(runtime_env[env_name])
+
+    extra = config.extra or {}
+    if is_multiplex_active():
+        if extra_key and extra_key in extra:
+            return str(extra.get(extra_key) or default)
+        return default
+
+    # Preserve legacy single-profile precedence: process env first, then YAML.
+    process_value = os.getenv(env_name)
+    if process_value:
+        return process_value
+    if extra_key and extra_key in extra:
+        return str(extra.get(extra_key) or default)
+    return default
+
+
+def _email_config_int(
+    config: PlatformConfig,
+    env_name: str,
+    default: int,
+) -> int:
+    try:
+        return int(_email_config_value(config, env_name, default=str(default)))
+    except (TypeError, ValueError):
+        return default
 # Automated sender patterns — emails from these are silently ignored
 _NOREPLY_PATTERNS = (
     "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
@@ -437,13 +475,20 @@ class EmailAdapter(BasePlatformAdapter):
         # misleading ``[Errno 8] nodename nor servname`` (an unresolvable name)
         # instead of an obvious "host not set" error.
         extra = config.extra or {}
-        self._address = (os.getenv("EMAIL_ADDRESS", "") or extra.get("address", "")).strip()
-        self._password = os.getenv("EMAIL_PASSWORD", "")
-        self._imap_host = (os.getenv("EMAIL_IMAP_HOST", "") or extra.get("imap_host", "")).strip()
-        self._imap_port = env_int("EMAIL_IMAP_PORT", 993)
-        self._smtp_host = (os.getenv("EMAIL_SMTP_HOST", "") or extra.get("smtp_host", "")).strip()
-        self._smtp_port = env_int("EMAIL_SMTP_PORT", 587)
-        self._poll_interval = env_int("EMAIL_POLL_INTERVAL", 15)
+        self._platform_config = config
+        self._address = _email_config_value(
+            config, "EMAIL_ADDRESS", extra_key="address"
+        ).strip()
+        self._password = _email_config_value(config, "EMAIL_PASSWORD")
+        self._imap_host = _email_config_value(
+            config, "EMAIL_IMAP_HOST", extra_key="imap_host"
+        ).strip()
+        self._imap_port = _email_config_int(config, "EMAIL_IMAP_PORT", 993)
+        self._smtp_host = _email_config_value(
+            config, "EMAIL_SMTP_HOST", extra_key="smtp_host"
+        ).strip()
+        self._smtp_port = _email_config_int(config, "EMAIL_SMTP_PORT", 587)
+        self._poll_interval = _email_config_int(config, "EMAIL_POLL_INTERVAL", 15)
 
         # Skip attachments — configured via config.yaml:
         #   platforms:
@@ -500,7 +545,9 @@ class EmailAdapter(BasePlatformAdapter):
         # gate below is skipped.
         if "require_authenticated_sender" in extra:
             self._require_authenticated_sender = bool(extra["require_authenticated_sender"])
-        elif env_bool("EMAIL_TRUST_FROM_HEADER", False):
+        elif _email_config_value(
+            config, "EMAIL_TRUST_FROM_HEADER"
+        ).strip().lower() in {"true", "1", "yes"}:
             self._require_authenticated_sender = False
         else:
             self._require_authenticated_sender = True
@@ -508,8 +555,8 @@ class EmailAdapter(BasePlatformAdapter):
         # Optional authserv-id to pin Authentication-Results to the operator's
         # own receiving server (defends against an injected header that sorts
         # first). Defaults to the From-domain of the agent's own address.
-        self._authserv_id = (
-            extra.get("authserv_id", "") or os.getenv("EMAIL_AUTHSERV_ID", "")
+        self._authserv_id = _email_config_value(
+            config, "EMAIL_AUTHSERV_ID", extra_key="authserv_id"
         ).strip().lower()
 
         # Track message IDs we've already processed to avoid duplicates
@@ -781,8 +828,7 @@ class EmailAdapter(BasePlatformAdapter):
             logger.error("[Email] IMAP fetch error: %s", e)
         return results
 
-    @staticmethod
-    def _allow_all_senders() -> bool:
+    def _allow_all_senders(self) -> bool:
         """Return True when the operator opted into accepting any sender.
 
         Mirrors the gateway authz allow-all resolution: the per-platform
@@ -792,12 +838,15 @@ class EmailAdapter(BasePlatformAdapter):
         """
         truthy = {"true", "1", "yes"}
         return (
-            os.getenv("EMAIL_ALLOW_ALL_USERS", "").strip().lower() in truthy
-            or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in truthy
+            _email_config_value(
+                self._platform_config, "EMAIL_ALLOW_ALL_USERS"
+            ).strip().lower() in truthy
+            or _email_config_value(
+                self._platform_config, "GATEWAY_ALLOW_ALL_USERS"
+            ).strip().lower() in truthy
         )
 
-    @staticmethod
-    def _allowlist_in_effect() -> bool:
+    def _allowlist_in_effect(self) -> bool:
         """Return True when a sender allowlist gates email access.
 
         Authorization keys on the From: address only when an allowlist is
@@ -807,8 +856,12 @@ class EmailAdapter(BasePlatformAdapter):
         and the authentication gate is unnecessary.
         """
         return bool(
-            os.getenv("EMAIL_ALLOWED_USERS", "").strip()
-            or os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
+            _email_config_value(
+                self._platform_config, "EMAIL_ALLOWED_USERS"
+            ).strip()
+            or _email_config_value(
+                self._platform_config, "GATEWAY_ALLOWED_USERS"
+            ).strip()
         )
 
     async def _dispatch_message(self, msg_data: Dict[str, Any]) -> None:
@@ -829,10 +882,16 @@ class EmailAdapter(BasePlatformAdapter):
         # that the gateway will never authorize.  Without this early guard,
         # a race between dispatch and authorization can result in the adapter
         # sending a reply even though the handler returned None.
-        allowed_raw = os.getenv("EMAIL_ALLOWED_USERS", "").strip()
+        allowed_raw = _email_config_value(
+            self._platform_config, "EMAIL_ALLOWED_USERS"
+        ).strip()
         if not allowed_raw:
-            if os.getenv("EMAIL_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"} and (
-                os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"}
+            if _email_config_value(
+                self._platform_config, "EMAIL_ALLOW_ALL_USERS"
+            ).strip().lower() not in {"true", "1", "yes"} and (
+                _email_config_value(
+                    self._platform_config, "GATEWAY_ALLOW_ALL_USERS"
+                ).strip().lower() not in {"true", "1", "yes"}
             ):
                 logger.debug(
                     "[Email] Dropping sender at dispatch — EMAIL_ALLOWED_USERS is unset "
@@ -1353,14 +1412,14 @@ async def _standalone_send(
     from email.mime.text import MIMEText
     from email.utils import formatdate
 
-    extra = getattr(pconfig, "extra", {}) or {}
-    address = extra.get("address") or os.getenv("EMAIL_ADDRESS", "")
-    password = os.getenv("EMAIL_PASSWORD", "")
-    smtp_host = extra.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
-    try:
-        smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
-    except (ValueError, TypeError):
-        smtp_port = 587
+    address = _email_config_value(
+        pconfig, "EMAIL_ADDRESS", extra_key="address"
+    ).strip()
+    password = _email_config_value(pconfig, "EMAIL_PASSWORD")
+    smtp_host = _email_config_value(
+        pconfig, "EMAIL_SMTP_HOST", extra_key="smtp_host"
+    ).strip()
+    smtp_port = _email_config_int(pconfig, "EMAIL_SMTP_PORT", 587)
 
     if not all([address, password, smtp_host]):
         return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
