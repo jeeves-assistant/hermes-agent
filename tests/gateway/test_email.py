@@ -215,6 +215,78 @@ class TestEmailResponseDelivery(unittest.TestCase):
         self.assertEqual(adapter._approval_discord_channel, "")
         self.assertEqual(adapter._approval_discord_thread, "")
 
+    def test_profile_scoped_mailbox_credentials_override_process_globals(self):
+        from agent.secret_scope import (
+            reset_secret_scope,
+            set_multiplex_active,
+            set_secret_scope,
+        )
+        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        process_values = {
+            "EMAIL_ADDRESS": "active@test.com",
+            "EMAIL_PASSWORD": "active-password",
+            "EMAIL_IMAP_HOST": "imap.active.test",
+            "EMAIL_SMTP_HOST": "smtp.active.test",
+        }
+        scoped_values = {
+            "EMAIL_ADDRESS": "secondary@test.com",
+            "EMAIL_PASSWORD": "secondary-password",
+            "EMAIL_IMAP_HOST": "imap.secondary.test",
+            "EMAIL_SMTP_HOST": "smtp.secondary.test",
+        }
+
+        with patch.dict(os.environ, process_values, clear=False):
+            set_multiplex_active(True)
+            token = set_secret_scope(scoped_values)
+            try:
+                config = GatewayConfig()
+                _apply_env_overrides(config)
+                adapter = EmailAdapter(config.platforms[Platform.EMAIL])
+            finally:
+                reset_secret_scope(token)
+                set_multiplex_active(False)
+
+        self.assertEqual(adapter._address, "secondary@test.com")
+        self.assertEqual(adapter._password, "secondary-password")
+        self.assertEqual(adapter._imap_host, "imap.secondary.test")
+        self.assertEqual(adapter._smtp_host, "smtp.secondary.test")
+
+    def test_unmaterialized_multiplex_mailbox_credentials_fail_closed(self):
+        from agent.secret_scope import set_multiplex_active
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        process_values = {
+            "EMAIL_ADDRESS": "active@test.com",
+            "EMAIL_PASSWORD": "active-password",
+            "EMAIL_IMAP_HOST": "imap.active.test",
+            "EMAIL_SMTP_HOST": "smtp.active.test",
+        }
+        with patch.dict(os.environ, process_values, clear=False):
+            set_multiplex_active(True)
+            try:
+                adapter = EmailAdapter(PlatformConfig(enabled=True))
+            finally:
+                set_multiplex_active(False)
+
+        self.assertEqual(adapter._address, "")
+        self.assertEqual(adapter._password, "")
+        self.assertEqual(adapter._imap_host, "")
+        self.assertEqual(adapter._smtp_host, "")
+
+    def test_runtime_mailbox_credentials_are_not_serialized_or_repr_exposed(self):
+        from gateway.config import PlatformConfig
+
+        config = PlatformConfig(
+            enabled=True,
+            _runtime_env={"EMAIL_PASSWORD": "do-not-expose"},
+        )
+
+        self.assertNotIn("_runtime_env", config.to_dict())
+        self.assertNotIn("do-not-expose", repr(config))
+
     def test_yaml_platform_keys_are_bridged_into_email_extra(self):
         from pathlib import Path
         import tempfile
