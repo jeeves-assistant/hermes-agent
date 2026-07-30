@@ -635,6 +635,11 @@ class PlatformConfig:
     # Platform-specific settings
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    # Profile-scoped runtime values materialized while the profile's secret
+    # scope is active. Deliberately excluded from repr/equality and to_dict so
+    # credentials never leak through config display or serialization.
+    _runtime_env: Dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "enabled": self.enabled,
@@ -2122,6 +2127,30 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if Platform.EMAIL in config.platforms:
         email_config = config.platforms[Platform.EMAIL]
         email_extra = email_config.extra
+
+        # EmailAdapter instances are created after config loading. Capture all
+        # profile-local EMAIL/GATEWAY values now so multiplexed adapters never
+        # consult another profile's process-global mailbox credentials or
+        # authorization settings. This mapping is runtime-only and is not
+        # serialized by PlatformConfig.to_dict().
+        for env_name in (
+            "EMAIL_ADDRESS",
+            "EMAIL_PASSWORD",
+            "EMAIL_IMAP_HOST",
+            "EMAIL_IMAP_PORT",
+            "EMAIL_SMTP_HOST",
+            "EMAIL_SMTP_PORT",
+            "EMAIL_POLL_INTERVAL",
+            "EMAIL_AUTHSERV_ID",
+            "EMAIL_TRUST_FROM_HEADER",
+            "EMAIL_ALLOW_ALL_USERS",
+            "EMAIL_ALLOWED_USERS",
+            "GATEWAY_ALLOW_ALL_USERS",
+            "GATEWAY_ALLOWED_USERS",
+        ):
+            env_value = getenv(env_name, "")
+            if env_value:
+                email_config._runtime_env[env_name] = env_value
 
         # Materialize response-routing settings while the active profile's
         # secret scope is installed. EmailAdapter is constructed after config
