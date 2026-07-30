@@ -119,6 +119,102 @@ class TestExtractAttachments(unittest.TestCase):
 class TestEmailResponseDelivery(unittest.TestCase):
     """Test approval-first response routing for inbound email."""
 
+    def test_profile_scoped_delivery_settings_override_process_global_channel(self):
+        from agent.secret_scope import (
+            reset_secret_scope,
+            set_multiplex_active,
+            set_secret_scope,
+        )
+        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        process_values = {
+            "EMAIL_RESPONSE_DELIVERY": "email",
+            "EMAIL_APPROVAL_DISCORD_CHANNEL": "ACTIVE_PROFILE_CHANNEL",
+            "DISCORD_HOME_CHANNEL": "ACTIVE_PROFILE_HOME",
+        }
+        scoped_values = {
+            "EMAIL_ADDRESS": "secondary@test.com",
+            "EMAIL_PASSWORD": "secondary-secret",
+            "EMAIL_IMAP_HOST": "imap.secondary.test",
+            "EMAIL_SMTP_HOST": "smtp.secondary.test",
+            "EMAIL_RESPONSE_DELIVERY": "discord",
+            "EMAIL_APPROVAL_DISCORD_CHANNEL": "SECONDARY_PROFILE_CHANNEL",
+        }
+
+        with patch.dict(os.environ, process_values, clear=False):
+            set_multiplex_active(True)
+            token = set_secret_scope(scoped_values)
+            try:
+                config = GatewayConfig()
+                _apply_env_overrides(config)
+                adapter = EmailAdapter(config.platforms[Platform.EMAIL])
+            finally:
+                reset_secret_scope(token)
+                set_multiplex_active(False)
+
+        self.assertEqual(adapter._response_delivery, "discord")
+        self.assertEqual(
+            adapter._approval_discord_channel,
+            "SECONDARY_PROFILE_CHANNEL",
+        )
+
+    def test_profile_scope_without_redirect_does_not_inherit_global_redirect(self):
+        from agent.secret_scope import (
+            reset_secret_scope,
+            set_multiplex_active,
+            set_secret_scope,
+        )
+        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        process_values = {
+            "EMAIL_RESPONSE_DELIVERY": "discord",
+            "EMAIL_APPROVAL_DISCORD_CHANNEL": "ACTIVE_PROFILE_CHANNEL",
+            "DISCORD_HOME_CHANNEL": "ACTIVE_PROFILE_HOME",
+        }
+        scoped_values = {
+            "EMAIL_ADDRESS": "secondary@test.com",
+            "EMAIL_PASSWORD": "secondary-secret",
+            "EMAIL_IMAP_HOST": "imap.secondary.test",
+            "EMAIL_SMTP_HOST": "smtp.secondary.test",
+        }
+
+        with patch.dict(os.environ, process_values, clear=False):
+            set_multiplex_active(True)
+            token = set_secret_scope(scoped_values)
+            try:
+                config = GatewayConfig()
+                _apply_env_overrides(config)
+                adapter = EmailAdapter(config.platforms[Platform.EMAIL])
+            finally:
+                reset_secret_scope(token)
+                set_multiplex_active(False)
+
+        self.assertEqual(adapter._response_delivery, "email")
+        self.assertEqual(adapter._approval_discord_channel, "")
+
+    def test_multiplex_adapter_without_materialized_routing_fails_closed(self):
+        from agent.secret_scope import set_multiplex_active
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+
+        process_values = {
+            "EMAIL_RESPONSE_DELIVERY": "discord",
+            "EMAIL_APPROVAL_DISCORD_CHANNEL": "ACTIVE_PROFILE_CHANNEL",
+            "DISCORD_HOME_CHANNEL": "ACTIVE_PROFILE_HOME",
+        }
+        with patch.dict(os.environ, process_values, clear=False):
+            set_multiplex_active(True)
+            try:
+                adapter = EmailAdapter(PlatformConfig(enabled=True))
+            finally:
+                set_multiplex_active(False)
+
+        self.assertEqual(adapter._response_delivery, "email")
+        self.assertEqual(adapter._approval_discord_channel, "")
+        self.assertEqual(adapter._approval_discord_thread, "")
+
     def test_yaml_platform_keys_are_bridged_into_email_extra(self):
         from pathlib import Path
         import tempfile
