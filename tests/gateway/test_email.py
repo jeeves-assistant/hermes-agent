@@ -204,7 +204,6 @@ class TestEmailResponseDelivery(unittest.TestCase):
             adapter = EmailAdapter(PlatformConfig(enabled=True))
             discord_adapter = EmailAdapter(PlatformConfig(enabled=True))
 
-        adapter._gateway_profile = "reviewer"
         resolver = MagicMock(return_value=discord_adapter)
         setattr(
             adapter,
@@ -215,7 +214,7 @@ class TestEmailResponseDelivery(unittest.TestCase):
             ),
         )
 
-        self.assertIs(adapter._discord_delivery_adapter(), discord_adapter)
+        self.assertIs(adapter._discord_delivery_adapter("reviewer"), discord_adapter)
         resolver.assert_called_once_with(Platform.DISCORD, "reviewer")
 
     def test_discord_response_delivery_does_not_fallback_across_profiles(self):
@@ -231,7 +230,6 @@ class TestEmailResponseDelivery(unittest.TestCase):
             adapter = EmailAdapter(PlatformConfig(enabled=True))
             active_discord_adapter = EmailAdapter(PlatformConfig(enabled=True))
 
-        adapter._gateway_profile = "reviewer"
         resolver = MagicMock(return_value=None)
         setattr(
             adapter,
@@ -242,7 +240,7 @@ class TestEmailResponseDelivery(unittest.TestCase):
             ),
         )
 
-        self.assertIsNone(adapter._discord_delivery_adapter())
+        self.assertIsNone(adapter._discord_delivery_adapter("reviewer"))
         resolver.assert_called_once_with(Platform.DISCORD, "reviewer")
 
     def test_stamped_discord_delivery_rejects_legacy_unscoped_resolver(self):
@@ -258,7 +256,6 @@ class TestEmailResponseDelivery(unittest.TestCase):
             adapter = EmailAdapter(PlatformConfig(enabled=True))
             active_discord_adapter = EmailAdapter(PlatformConfig(enabled=True))
 
-        adapter._gateway_profile = "reviewer"
         legacy_resolver = MagicMock(return_value=active_discord_adapter)
         legacy_resolver.side_effect = lambda platform: active_discord_adapter
         setattr(
@@ -270,7 +267,7 @@ class TestEmailResponseDelivery(unittest.TestCase):
             ),
         )
 
-        self.assertIsNone(adapter._discord_delivery_adapter())
+        self.assertIsNone(adapter._discord_delivery_adapter("reviewer"))
         legacy_resolver.assert_called_once_with(Platform.DISCORD, "reviewer")
 
     def test_discord_response_delivery_leaves_non_final_notices_on_email_path(self):
