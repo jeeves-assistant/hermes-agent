@@ -48,6 +48,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.config import Platform, PlatformConfig
+from gateway.session import SessionSource
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -1141,6 +1142,7 @@ class EmailAdapter(BasePlatformAdapter):
         metadata: Any = None,
         max_retries: int = 2,
         base_delay: float = 2.0,
+        source: Optional[SessionSource] = None,
     ) -> SendResult:
         """Deliver the gateway's automatic final response to an inbound email.
 
@@ -1158,13 +1160,15 @@ class EmailAdapter(BasePlatformAdapter):
                 metadata=metadata,
                 max_retries=max_retries,
                 base_delay=base_delay,
+                source=source,
             )
 
         channel_id = self._approval_discord_thread or self._approval_discord_channel
         if not channel_id:
             return SendResult(success=False, error="No Discord approval channel configured")
 
-        discord_adapter = self._discord_delivery_adapter()
+        profile_name = source.profile if source is not None else None
+        discord_adapter = self._discord_delivery_adapter(profile_name)
         if discord_adapter is None:
             return SendResult(success=False, error="Discord adapter is not connected")
 
@@ -1206,15 +1210,17 @@ class EmailAdapter(BasePlatformAdapter):
             "approval_discord",
         }
 
-    def _discord_delivery_adapter(self) -> Optional[BasePlatformAdapter]:
-        """Resolve the active Discord adapter for email-intake final replies."""
+    def _discord_delivery_adapter(
+        self, profile_name: Optional[str] = None
+    ) -> Optional[BasePlatformAdapter]:
+        """Resolve Discord for the inbound event's profile, failing closed."""
 
         runner = getattr(self, "gateway_runner", None)
         if runner is None:
             return None
 
         adapter = None
-        profile_name = (self._gateway_profile or "").strip() or None
+        profile_name = (profile_name or "").strip() or None
         resolver = getattr(runner, "_authorization_adapter", None)
         if callable(resolver):
             try:
