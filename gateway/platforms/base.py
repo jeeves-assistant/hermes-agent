@@ -5443,6 +5443,7 @@ class BasePlatformAdapter(ABC):
         metadata: Any = None,
         max_retries: int = 2,
         base_delay: float = 2.0,
+        source: Optional[SessionSource] = None,
     ) -> "SendResult":
         """Send a final agent response.
 
@@ -6551,6 +6552,7 @@ class BasePlatformAdapter(ABC):
                         content=text_content,
                         reply_to=_reply_anchor,
                         metadata=_final_thread_metadata,
+                        source=event.source,
                     )
                     _record_delivery(result)
                     if _obligation_id is not None:
