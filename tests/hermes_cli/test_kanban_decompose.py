@@ -15,6 +15,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_decompose as decomp
+from hermes_cli import projects_db as pdb
 
 
 @pytest.fixture
@@ -181,6 +182,68 @@ def test_large_refactor_guard_forces_split_before_worker_spawn(kanban_home):
     with kb.connect() as conn:
         comments = kb.list_comments(conn, tid)
     assert any("Large-refactor guard split this card" in c.body for c in comments)
+
+
+def test_large_refactor_guard_preserves_project_scope_for_children(
+    kanban_home, tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pdb.connect_closing() as pconn:
+        project_id = pdb.create_project(
+            pconn, name="Widget Project", primary_path=str(repo)
+        )
+
+    kb.create_board("scoped", name="Scoped", project_id=project_id)
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "scoped")
+    file_list = "\n".join(f"src/package/module_{i}.py" for i in range(10))
+    with kb.connect(board="scoped") as conn:
+        tid = kb.create_task(
+            conn,
+            title="Refactor widget project",
+            body=f"Refactor this project across these files.\n{file_list}",
+            triage=True,
+            board="scoped",
+        )
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "large refactor split",
+        "tasks": [
+            {"title": "audit widget", "body": "Map current code.", "assignee": "engineer", "parents": []},
+            {"title": "refactor widget", "body": "Implement the focused change.", "assignee": "engineer", "parents": [0]},
+            {"title": "verify widget", "body": "Run focused verification.", "assignee": "engineer", "parents": [1]},
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "engineer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is True
+    assert outcome.child_ids and len(outcome.child_ids) == 3
+    with kb.connect(board="scoped") as conn:
+        root = kb.get_task(conn, tid)
+        children = [kb.get_task(conn, child_id) for child_id in outcome.child_ids]
+
+    assert root is not None
+    assert root.project_id == project_id
+    assert {child.workspace_path for child in children if child is not None} == {
+        str(repo / ".worktrees" / child_id) for child_id in outcome.child_ids
+    }
+    for child in children:
+        assert child is not None
+        assert child.project_id == project_id
+        assert child.workspace_kind == "worktree"
+        assert child.branch_name is not None
+        assert child.branch_name.startswith(f"widget-project/{child.id}-")
 
 
 def test_large_refactor_guard_preserves_narrow_singleton_refactors(kanban_home):
