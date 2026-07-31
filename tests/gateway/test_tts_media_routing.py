@@ -11,7 +11,7 @@ import importlib
 import sys
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -38,7 +38,7 @@ class _MediaRoutingAdapter(BasePlatformAdapter):
         return {"id": chat_id, "type": "dm"}
 
 
-def _event(thread_id=None):
+def _event(thread_id=None, message_type=MessageType.TEXT):
     source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="chat-1",
@@ -47,7 +47,7 @@ def _event(thread_id=None):
     )
     return MessageEvent(
         text="make speech",
-        message_type=MessageType.TEXT,
+        message_type=message_type,
         source=source,
         message_id="msg-1",
     )
@@ -63,6 +63,36 @@ def _allowed_media_path(tmp_path, monkeypatch, name):
         (root,),
     )
     return media_file.resolve()
+
+
+@pytest.mark.asyncio
+async def test_base_adapter_skips_ledger_when_redirected_source_opts_out(monkeypatch):
+    adapter = _MediaRoutingAdapter()
+    event = _event()
+    adapter._message_handler = AsyncMock(return_value="Approval details")
+    adapter._allow_final_response_delivery_ledger = lambda: False
+    record_obligation = MagicMock()
+    monkeypatch.setattr("gateway.delivery_ledger.ledger_enabled", lambda: True)
+    monkeypatch.setattr("gateway.delivery_ledger.record_obligation", record_obligation)
+
+    await adapter._process_message_background(event, build_session_key(event.source))
+
+    record_obligation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_base_adapter_suppresses_auto_tts_when_redirected_source_opts_out():
+    adapter = _MediaRoutingAdapter()
+    event = _event(message_type=MessageType.VOICE)
+    adapter._message_handler = AsyncMock(return_value="Approval details")
+    adapter._allow_final_response_media_delivery = lambda: False
+    adapter._should_auto_tts_for_chat = MagicMock(return_value=True)
+    adapter.play_tts = AsyncMock()
+
+    await adapter._process_message_background(event, build_session_key(event.source))
+
+    adapter._should_auto_tts_for_chat.assert_not_called()
+    adapter.play_tts.assert_not_awaited()
 
 
 @pytest.mark.asyncio
