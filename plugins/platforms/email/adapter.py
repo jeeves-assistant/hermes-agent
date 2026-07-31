@@ -506,6 +506,7 @@ class EmailAdapter(BasePlatformAdapter):
         ).strip()
         self._approval_discord_thread = str(
             extra.get("approval_discord_thread")
+            or extra.get("approval_discord_thread_id")
             or os.getenv("EMAIL_APPROVAL_DISCORD_THREAD_ID")
             or os.getenv("DISCORD_HOME_CHANNEL_THREAD_ID")
             or ""
@@ -1030,6 +1031,14 @@ class EmailAdapter(BasePlatformAdapter):
         explicit approved outbound email, but are unsafe for approval-first
         intake responses because they target the inbound sender via SMTP.
         """
+        return self._response_delivery not in {
+            "discord",
+            "discord_home",
+            "approval_discord",
+        }
+
+    def _allow_final_response_delivery_ledger(self) -> bool:
+        """Prevent recovery from replaying redirected replies through SMTP."""
         return self._response_delivery not in {
             "discord",
             "discord_home",
