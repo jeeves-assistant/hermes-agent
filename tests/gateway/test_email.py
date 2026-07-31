@@ -249,10 +249,16 @@ class TestEmailResponseDelivery(unittest.TestCase):
         }, clear=False):
             adapter = EmailAdapter(PlatformConfig(
                 enabled=True,
-                extra={"response_delivery": "discord", "approval_discord_channel": "12345"},
+                extra={
+                    "response_delivery": "discord",
+                    "approval_discord_channel": "12345",
+                    "approval_discord_thread_id": "67890",
+                },
             ))
 
+        self.assertEqual(adapter._approval_discord_thread, "67890")
         self.assertFalse(adapter._allow_final_response_media_delivery())
+        self.assertFalse(adapter._allow_final_response_delivery_ledger())
 
     def test_default_response_delivery_keeps_automatic_media_email_enabled(self):
         from gateway.config import PlatformConfig
@@ -268,6 +274,7 @@ class TestEmailResponseDelivery(unittest.TestCase):
             adapter = EmailAdapter(PlatformConfig(enabled=True))
 
         self.assertTrue(adapter._allow_final_response_media_delivery())
+        self.assertTrue(adapter._allow_final_response_delivery_ledger())
 
     def test_email_discord_delivery_suppresses_home_channel_notice(self):
         from gateway.run import _suppress_home_channel_notice
