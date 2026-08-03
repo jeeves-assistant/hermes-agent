@@ -203,9 +203,10 @@ class TestNextAvailableAt:
         original = pool._available_entries
 
         def _probe(**kwargs):
-            held["locked"] = not pool._lock.acquire(blocking=False)
-            if not held["locked"]:
-                pool._lock.release()
+            # CredentialPool now uses an RLock because deferred refresh
+            # mutations re-enter the lock.  A same-thread non-blocking acquire
+            # therefore cannot prove ownership; use the lock's ownership probe.
+            held["locked"] = bool(getattr(pool._lock, "_is_owned")())
             return original(**kwargs)
 
         pool._available_entries = _probe

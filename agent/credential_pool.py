@@ -642,7 +642,11 @@ class CredentialPool:
         ``_available_entries`` caller (see the comment on ``has_available``).
         """
         with self._lock:
-            if self._available_entries():
+            # _available_entries() returns ``(available, pending_refresh)``;
+            # testing the tuple itself is always truthy, even when both lists
+            # are empty, and therefore suppresses every reset timestamp.
+            available, _pending_refresh = self._available_entries()
+            if available:
                 return None
             candidates: List[float] = []
             for entry in self._entries:
