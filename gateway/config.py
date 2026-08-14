@@ -1668,6 +1668,23 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["typing_indicator"] = platform_cfg["typing_indicator"]
                 if "typing_status_text" in platform_cfg:
                     bridged["typing_status_text"] = platform_cfg["typing_status_text"]
+                # Generic platform extras that should work when users place
+                # them directly under ``platforms.<name>`` instead of nesting
+                # under ``extra``.  This keeps adapter-specific runtime knobs
+                # (for example email approval routing) from being silently
+                # dropped by PlatformConfig.from_dict().
+                for _extra_key in (
+                    "suppress_home_notice",
+                    "suppress_home_channel_notice",
+                    "response_delivery",
+                    "approval_discord_channel",
+                    "approval_discord_thread",
+                    "approval_discord_thread_id",
+                    "approval_policy_note",
+                    "skip_attachments",
+                ):
+                    if _extra_key in platform_cfg:
+                        bridged[_extra_key] = platform_cfg[_extra_key]
                 # Bridge top-level port/host/secret into extra for platforms
                 # whose adapters read these from config.extra (webhook,
                 # msgraph_webhook, api_server).  Without this, YAML like:
@@ -2174,6 +2191,47 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "imap_host": email_imap,
             "smtp_host": email_smtp,
         })
+    if Platform.EMAIL in config.platforms:
+        email_config = config.platforms[Platform.EMAIL]
+        email_extra = email_config.extra
+
+        # Materialize response-routing settings while the active profile's
+        # secret scope is installed. EmailAdapter is constructed after config
+        # loading and must not fall through to process-global values belonging
+        # to another multiplexed profile.
+        email_response_delivery = getenv("EMAIL_RESPONSE_DELIVERY", "").strip().lower()
+        if email_response_delivery and "response_delivery" not in email_extra:
+            email_extra["response_delivery"] = email_response_delivery
+        elif "response_delivery" not in email_extra:
+            email_extra["response_delivery"] = "email"
+
+        discord_home = None
+        if Platform.DISCORD in config.platforms:
+            discord_home = config.platforms[Platform.DISCORD].home_channel
+
+        approval_channel = getenv("EMAIL_APPROVAL_DISCORD_CHANNEL", "").strip()
+        if approval_channel and "approval_discord_channel" not in email_extra:
+            email_extra["approval_discord_channel"] = approval_channel
+        elif "approval_discord_channel" not in email_extra:
+            email_extra["approval_discord_channel"] = (
+                str(discord_home.chat_id).strip() if discord_home else ""
+            )
+
+        approval_thread = getenv("EMAIL_APPROVAL_DISCORD_THREAD_ID", "").strip()
+        if approval_thread and (
+            "approval_discord_thread" not in email_extra
+            and "approval_discord_thread_id" not in email_extra
+        ):
+            email_extra["approval_discord_thread"] = approval_thread
+        elif (
+            "approval_discord_thread" not in email_extra
+            and "approval_discord_thread_id" not in email_extra
+        ):
+            email_extra["approval_discord_thread"] = (
+                str(discord_home.thread_id).strip()
+                if discord_home and discord_home.thread_id
+                else ""
+            )
     email_home = getenv("EMAIL_HOME_ADDRESS")
     if email_home and Platform.EMAIL in config.platforms:
         config.platforms[Platform.EMAIL].home_channel = HomeChannel(
