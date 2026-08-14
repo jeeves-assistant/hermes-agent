@@ -5441,6 +5441,52 @@ class BasePlatformAdapter(ABC):
             return self
         return live_adapter
 
+    def _allow_final_response_media_delivery(self) -> bool:
+        """Whether extracted final-response media may use this source adapter.
+
+        Input-only adapters can redirect the text final response through a
+        narrow delivery seam while their ordinary media methods still target
+        the inbound source. They must opt out here so generated attachments
+        cannot bypass that redirect and leak back through the source transport.
+        """
+        return True
+
+    def _allow_final_response_delivery_ledger(self) -> bool:
+        """Whether this source adapter may persist final-response obligations.
+
+        Redirecting input-only adapters cannot safely record their source
+        address as the recovery destination. They opt out until the ledger can
+        represent the actual routed destination.
+        """
+        return True
+
+    async def _send_final_response_with_retry(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Any = None,
+        max_retries: int = 2,
+        base_delay: float = 2.0,
+        source: Optional[SessionSource] = None,
+    ) -> "SendResult":
+        """Send a final agent response.
+
+        Most adapters use the ordinary retry wrapper. Adapters that are input
+        surfaces only may override this narrow seam without changing system
+        notices, approval replies, busy acknowledgements, or other internal
+        callers of :meth:`_send_with_retry`.
+        """
+
+        return await self._send_with_retry(
+            chat_id=chat_id,
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+            max_retries=max_retries,
+            base_delay=base_delay,
+        )
+
     async def _send_with_retry(
         self,
         chat_id: str,
@@ -6344,6 +6390,20 @@ class BasePlatformAdapter(ABC):
                     if local_files:
                         logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
 
+                if (
+                    (images or local_files or media_files)
+                    and not self._allow_final_response_media_delivery()
+                ):
+                    logger.warning(
+                        "[%s] Suppressing %d extracted final-response attachment(s) "
+                        "because this input-only adapter redirects automatic replies",
+                        self.name,
+                        len(images) + len(local_files) + len(media_files),
+                    )
+                    images = []
+                    local_files = []
+                    media_files = []
+
                 # A2 (#29346): extraction can reduce a non-empty response to
                 # empty text with no attachment, and the `if text_content` guard
                 # below then drops it silently. Recover on every platform (#33842
@@ -6377,7 +6437,8 @@ class BasePlatformAdapter(ABC):
                 _tts_path = None
                 _tts_paths: List[str] = []
                 _tts_requested_path = None
-                if (self._should_auto_tts_for_chat(event.source.chat_id)
+                if (self._allow_final_response_media_delivery()
+                        and self._should_auto_tts_for_chat(event.source.chat_id)
                         and event.message_type == MessageType.VOICE
                         and text_content
                         and not media_files
@@ -6499,7 +6560,10 @@ class BasePlatformAdapter(ABC):
                                 record_obligation,
                             )
 
-                            if await asyncio.to_thread(ledger_enabled):
+                            if (
+                                await asyncio.to_thread(ledger_enabled)
+                                and self._allow_final_response_delivery_ledger()
+                            ):
                                 _obligation_id = compute_obligation_id(
                                     session_key,
                                     str(getattr(event, "message_id", "") or ""),
@@ -6521,11 +6585,12 @@ class BasePlatformAdapter(ABC):
                         except Exception:
                             logger.debug("delivery ledger record failed", exc_info=True)
                             _obligation_id = None
-                    result = await delivery_adapter._send_with_retry(
+                    result = await delivery_adapter._send_final_response_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,
                         reply_to=_reply_anchor,
                         metadata=_final_thread_metadata,
+                        source=event.source,
                     )
                     _record_delivery(result)
                     if _obligation_id is not None:
