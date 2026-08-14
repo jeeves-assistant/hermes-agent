@@ -1240,7 +1240,10 @@ class GatewayTurnMixin:
         """First-ever-message onboarding note + one-time 'no home channel' prompt (both only when
         the session has no history). Delivered on the user message (sidecar), NOT the ephemeral
         system prompt: present-on-turn-1/absent-on-turn-2 was a guaranteed prompt diff + rebuild."""
-        from gateway.run import _hermes_home, _home_target_env_var, _load_gateway_config
+        from gateway.run import (
+            _hermes_home, _home_target_env_var, _load_gateway_config,
+            _suppress_home_channel_notice,
+        )
         if history:
             return
         if not await self.async_session_store.has_any_sessions():
@@ -1289,7 +1292,7 @@ class GatewayTurnMixin:
                 prof = (getattr(source, "profile", None) or "").strip()
                 if prof and prof != "default" and _lgc().get_home_channel(source.platform):
                     home_env = "set"
-        if not home_env:
+        if not home_env and not _suppress_home_channel_notice(platform_name):
             # Slack routes every command through the parent `/hermes`; bare `/sethome` would fail.
             sethome_cmd = "/hermes sethome" if source.platform == Platform.SLACK else "/sethome"
             await self._deliver_platform_notice(

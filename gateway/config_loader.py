@@ -210,7 +210,12 @@ _SHARED_KEYS: tuple = (
     ),
     ("channel_skill_bindings", _DISCORD_SLACK, None),
     ("channel_prompts", None, _str_keyed),
-    *_plain("gateway_restart_notification", "typing_indicator", "typing_status_text"),
+    *_plain(
+        "gateway_restart_notification", "typing_indicator", "typing_status_text",
+        "suppress_home_notice", "suppress_home_channel_notice", "response_delivery",
+        "approval_discord_channel", "approval_discord_thread",
+        "approval_discord_thread_id", "approval_policy_note", "skip_attachments",
+    ),
 )
 
 # Top-level port/host/secret bridged into ``extra`` for adapters that read them from config.extra

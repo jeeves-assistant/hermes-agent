@@ -488,6 +488,29 @@ def _scrub_explicit_markers(config: GatewayConfig) -> None:
     for platform_config in config.platforms.values():
         platform_config.extra.pop("_enabled_explicit", None)
 
+
+def _email_response_routing(config: GatewayConfig) -> None:
+    """Materialize approval-first email routing inside the active profile scope."""
+    email_config = config.platforms.get(Platform.EMAIL)
+    if email_config is None:
+        return
+    extra = email_config.extra
+    response_delivery = getenv("EMAIL_RESPONSE_DELIVERY", "").strip().lower()
+    extra.setdefault("response_delivery", response_delivery or "email")
+    discord_config = config.platforms.get(Platform.DISCORD)
+    discord_home = discord_config.home_channel if discord_config else None
+    approval_channel = getenv("EMAIL_APPROVAL_DISCORD_CHANNEL", "").strip()
+    extra.setdefault(
+        "approval_discord_channel",
+        approval_channel or (str(discord_home.chat_id).strip() if discord_home else ""),
+    )
+    if "approval_discord_thread" not in extra and "approval_discord_thread_id" not in extra:
+        approval_thread = getenv("EMAIL_APPROVAL_DISCORD_THREAD_ID", "").strip()
+        extra["approval_discord_thread"] = (
+            approval_thread
+            or (str(discord_home.thread_id).strip() if discord_home and discord_home.thread_id else "")
+        )
+
 # Order is significant: a home channel only attaches to a platform that already exists (Telegram's
 # reply mode may create the entry first; Discord reads home first). Relay disabling runs after the
 # plugin pass; the marker scrub must be last.
@@ -543,6 +566,7 @@ _ENV_STEPS: tuple = (
         fixed=(("address", "EMAIL_ADDRESS"), ("imap_host", "EMAIL_IMAP_HOST"), ("smtp_host", "EMAIL_SMTP_HOST")),
     ),
     _Home(Platform.EMAIL, "EMAIL_HOME_ADDRESS"),
+    _email_response_routing,
     _Cred(Platform.SMS, ("TWILIO_ACCOUNT_SID",), then=_sms_api_key),
     _Home(Platform.SMS, "SMS_HOME_CHANNEL"),
     _api_server,
