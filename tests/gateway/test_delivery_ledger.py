@@ -221,6 +221,22 @@ class TestGatewayRedeliverySweep:
 
         assert blocked_event_loop == []
 
+    @pytest.mark.asyncio
+    async def test_adapter_policy_blocks_recovery_without_spending_attempt(self):
+        _record()
+        _orphan("ob-1")
+        adapter = self._adapter()
+        adapter._allow_final_response_delivery_ledger.return_value = False
+        runner = self._runner(adapter)
+
+        n = await runner._redeliver_pending_obligations()
+
+        assert n == 0
+        adapter.send.assert_not_awaited()
+        row = _row("ob-1")
+        assert row is not None
+        assert row["state"] == "pending"
+        assert row["attempts"] == 0
 
 class TestAttemptsOnlySpentOnRealSends:
     """``attempts`` is the redelivery budget — it must buy a send.
