@@ -1472,6 +1472,45 @@ def _home_thread_env_var(platform_name: str) -> str:
     return f"{_home_target_env_var(platform_name)}_THREAD_ID"
 
 
+def _suppress_home_channel_notice(platform_name: str) -> bool:
+    """Return True when an input-only platform suppresses the first-run home prompt."""
+    def _profile_env(name: str) -> str:
+        try:
+            from agent.secret_scope import UnscopedSecretError, get_secret
+            try:
+                return str(get_secret(name, "") or "")
+            except UnscopedSecretError:
+                return ""
+        except ImportError:
+            return os.getenv(name, "")
+
+    env_prefix = platform_name.upper().replace("-", "_")
+    if _profile_env(f"{env_prefix}_SUPPRESS_HOME_NOTICE").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if _profile_env(f"{env_prefix}_SUPPRESS_HOME_CHANNEL_NOTICE").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if platform_name == "email" and _profile_env("EMAIL_RESPONSE_DELIVERY").strip().lower() in {
+        "discord", "discord_home", "approval_discord",
+    }:
+        return True
+    try:
+        cfg = _load_gateway_config()
+        platforms = cfg.get("platforms") or {}
+        platform_cfg = platforms.get(platform_name) or {}
+        if not isinstance(platform_cfg, dict):
+            return False
+        response_delivery = str(platform_cfg.get("response_delivery") or "").strip().lower()
+        return bool(
+            platform_cfg.get("suppress_home_notice")
+            or platform_cfg.get("suppress_home_channel_notice")
+            or (platform_name == "email" and response_delivery in {
+                "discord", "discord_home", "approval_discord",
+            })
+        )
+    except Exception:
+        return False
+
+
 def _restart_notification_pending() -> bool:
     """Return True when a /restart completion marker is waiting to be delivered."""
     return (_hermes_home / ".restart_notify.json").exists()

@@ -3200,6 +3200,25 @@ class BasePlatformAdapter(ABC):
             return live_adapter
         return self
 
+    def _allow_final_response_media_delivery(self) -> bool:
+        """Whether final-response media may be sent through this source adapter."""
+        return True
+
+    def _allow_final_response_delivery_ledger(self) -> bool:
+        """Whether final-response obligations may be persisted for this source adapter."""
+        return True
+
+    async def _send_final_response_with_retry(
+        self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Any = None,
+        max_retries: int = 2, base_delay: float = 2.0,
+        source: Optional[SessionSource] = None,
+    ) -> "SendResult":
+        """Narrow final-response seam; input-only adapters may redirect it safely."""
+        return await self._send_with_retry(
+            chat_id=chat_id, content=content, reply_to=reply_to, metadata=metadata,
+            max_retries=max_retries, base_delay=base_delay,
+        )
+
     async def _send_with_retry(
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Any = None,
         max_retries: int = 2, base_delay: float = 2.0) -> "SendResult":
@@ -3623,7 +3642,8 @@ class BasePlatformAdapter(ABC):
         skipped when streaming TTS already delivered audio this turn."""
         generation = getattr(interrupt_event, "_hermes_run_generation", None)
         return bool(
-            self._should_auto_tts_for_chat(event.source.chat_id)
+            self._allow_final_response_media_delivery()
+            and self._should_auto_tts_for_chat(event.source.chat_id)
             and event.message_type == MessageType.VOICE and text_content and not media_files
             and not self._streaming_tts_turn_completed(session_key, generation, event=event))
 
@@ -3648,6 +3668,8 @@ class BasePlatformAdapter(ABC):
         or None."""
         if is_ephemeral_response or str(event.text or "").lstrip().startswith(
             ("/", self.typed_command_prefix or "!")):
+            return None
+        if not self._allow_final_response_delivery_ledger():
             return None
         try:
             from gateway.delivery_ledger import (
@@ -3760,9 +3782,9 @@ class BasePlatformAdapter(ABC):
                     len(text_content), event.source.chat_id)
         _obligation_id = await self._record_delivery_obligation(
             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
-        result = await delivery_adapter._send_with_retry(
+        result = await delivery_adapter._send_final_response_with_retry(
             chat_id=event.source.chat_id, content=text_content,
-            reply_to=_reply_anchor_for_event(event), metadata=metadata)
+            reply_to=_reply_anchor_for_event(event), metadata=metadata, source=event.source)
         record_delivery(result)
         if _obligation_id is not None:
             await self._finalize_delivery_obligation(_obligation_id, result, event, delivery_adapter)
@@ -3792,6 +3814,13 @@ class BasePlatformAdapter(ABC):
         then fail loudly if a non-empty response produced nothing deliverable."""
         human_delay = self._get_human_delay()
         images, media_files, local_files = extracted.images, extracted.media_files, extracted.local_files
+        if (images or media_files or local_files) and not self._allow_final_response_media_delivery():
+            logger.warning(
+                "[%s] Suppressing %d extracted final-response attachment(s) because this "
+                "input-only adapter redirects automatic replies",
+                self.name, len(images) + len(media_files) + len(local_files),
+            )
+            images, media_files, local_files = [], [], []
         if images:
             logger.info("[%s] Extracted %d image(s) to send as attachments", self.name, len(images))
             await self._send_image_batch(event, images, metadata, human_delay)

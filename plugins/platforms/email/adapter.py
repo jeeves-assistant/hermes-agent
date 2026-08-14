@@ -25,7 +25,10 @@ from gateway.platforms.base import (BasePlatformAdapter, MessageEvent, MessageTy
                                     cache_document_from_bytes, cache_image_from_bytes)
 from gateway.config import Platform, PlatformConfig
 from utils import is_truthy_value
-from gateway.platforms._shared import get_scoped_secret as _get_secret, coerce_port
+from gateway.platforms._shared import (
+    get_scoped_secret as _get_secret, coerce_port, profile_scoped,
+)
+from gateway.session import SessionSource
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +341,35 @@ class EmailAdapter(BasePlatformAdapter):
         self._smtp_tls_verify = tls_verify("EMAIL_SMTP_TLS_VERIFY", "smtp_tls_verify")
         self._poll_interval = _esecret_int("EMAIL_POLL_INTERVAL", 15)
         self._skip_attachments = extra.get("skip_attachments", False)  # platforms.email.skip_attachments
+        if "response_delivery" in extra:
+            response_delivery = extra.get("response_delivery")
+        elif profile_scoped():
+            response_delivery = "email"
+        else:
+            response_delivery = _get_secret("EMAIL_RESPONSE_DELIVERY", "") or "email"
+        self._response_delivery = str(response_delivery or "email").strip().lower()
+        if "approval_discord_channel" in extra:
+            approval_discord_channel = extra.get("approval_discord_channel")
+        elif profile_scoped():
+            approval_discord_channel = ""
+        else:
+            approval_discord_channel = (
+                _get_secret("EMAIL_APPROVAL_DISCORD_CHANNEL", "")
+                or _get_secret("DISCORD_HOME_CHANNEL", "") or ""
+            )
+        self._approval_discord_channel = str(approval_discord_channel or "").strip()
+        if "approval_discord_thread" in extra:
+            approval_discord_thread = extra.get("approval_discord_thread")
+        elif "approval_discord_thread_id" in extra:
+            approval_discord_thread = extra.get("approval_discord_thread_id")
+        elif profile_scoped():
+            approval_discord_thread = ""
+        else:
+            approval_discord_thread = (
+                _get_secret("EMAIL_APPROVAL_DISCORD_THREAD_ID", "")
+                or _get_secret("DISCORD_HOME_CHANNEL_THREAD_ID", "") or ""
+            )
+        self._approval_discord_thread = str(approval_discord_thread or "").strip()
         # Require an authenticated From: domain (SPF/DKIM/DMARC) before trusting it for authorization
         # (GHSA-rxqh-5572-8m77). Default ON; opt out via require_authenticated_sender: false / EMAIL_TRUST_FROM_HEADER=true.
         if "require_authenticated_sender" in extra:
@@ -643,6 +675,62 @@ class EmailAdapter(BasePlatformAdapter):
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send an email reply to the given address."""
         return await self._run_send(self._send_email, (chat_id, content, reply_to), "[Email] Send failed to %s: %s", chat_id)
+
+    async def _send_final_response_with_retry(
+        self, chat_id: str, content: str, reply_to: Optional[str] = None,
+        metadata: Any = None, max_retries: int = 2, base_delay: float = 2.0,
+        source: Optional[SessionSource] = None,
+    ) -> SendResult:
+        """Route automatic inbound-email responses to the configured Discord approval target."""
+        if self._response_delivery not in {"discord", "discord_home", "approval_discord"}:
+            return await super()._send_final_response_with_retry(
+                chat_id=chat_id, content=content, reply_to=reply_to, metadata=metadata,
+                max_retries=max_retries, base_delay=base_delay, source=source,
+            )
+        channel_id = self._approval_discord_thread or self._approval_discord_channel
+        if not channel_id:
+            return SendResult(success=False, error="No Discord approval channel configured")
+        discord_adapter = self._discord_delivery_adapter(source.profile if source is not None else None)
+        if discord_adapter is None:
+            return SendResult(success=False, error="Discord adapter is not connected")
+        result = await discord_adapter._send_with_retry(
+            chat_id=channel_id, content=content, metadata=None,
+            max_retries=max_retries, base_delay=base_delay,
+        )
+        if result.success:
+            logger.info("[Email] Routed inbound-email response to Discord channel %s", channel_id)
+        else:
+            logger.error("[Email] Discord approval delivery failed; suppressing email fallback: %s", result.error)
+        return result
+
+    def _allow_final_response_media_delivery(self) -> bool:
+        return self._response_delivery not in {"discord", "discord_home", "approval_discord"}
+
+    def _allow_final_response_delivery_ledger(self) -> bool:
+        return self._response_delivery not in {"discord", "discord_home", "approval_discord"}
+
+    def _discord_delivery_adapter(self, profile_name: Optional[str] = None) -> Optional[BasePlatformAdapter]:
+        """Resolve Discord for the inbound event's profile, failing closed across identities."""
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None:
+            return None
+        adapter = None
+        profile_name = (profile_name or "").strip() or None
+        resolver = getattr(runner, "_authorization_adapter", None)
+        if callable(resolver):
+            try:
+                adapter = resolver(Platform.DISCORD, profile_name)
+            except TypeError:
+                if profile_name is not None:
+                    return None
+                adapter = resolver(Platform.DISCORD)
+            except Exception:
+                logger.debug("[Email] Failed to resolve Discord adapter from gateway runner", exc_info=True)
+        if adapter is None:
+            if profile_name is not None:
+                return None
+            adapter = (getattr(runner, "adapters", None) or {}).get(Platform.DISCORD)
+        return adapter if isinstance(adapter, BasePlatformAdapter) else None
 
     def _message_id_domain(self) -> str:
         """Domain for generated Message-IDs; ``localhost`` when EMAIL_ADDRESS lacks ``@``."""

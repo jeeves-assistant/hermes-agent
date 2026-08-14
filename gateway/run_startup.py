@@ -268,12 +268,29 @@ class GatewayStartupMixin:
             # a disconnected bot's retry budget because another bot on that platform is online.
             _profile_adapters = getattr(self, "_profile_adapters", None) or {}
             _pval = lambda p: getattr(p, "value", str(p))  # noqa: E731
-            _deliverable_targets = {(_pval(p), "default") for p in self.adapters}
+            def _ledger_allowed(adapter) -> bool:
+                policy = getattr(adapter, "_allow_final_response_delivery_ledger", None)
+                try:
+                    return policy is None or bool(policy())
+                except Exception:
+                    logger.warning("Skipping delivery-ledger recovery: adapter policy failed", exc_info=True)
+                    return False
+
+            _deliverable_targets = {
+                (_pval(p), "default") for p, adapter in self.adapters.items()
+                if _ledger_allowed(adapter)
+            }
             # Legacy rows (no adapter_profile) are unambiguous only without multiplexing; else fail closed.
             if not _profile_adapters:
-                _deliverable_targets.update((_pval(p), None) for p in self.adapters)
+                _deliverable_targets.update(
+                    (_pval(p), None) for p, adapter in self.adapters.items()
+                    if _ledger_allowed(adapter)
+                )
             for _profile, _adapters in _profile_adapters.items():
-                _deliverable_targets.update((_pval(p), _profile) for p in _adapters)
+                _deliverable_targets.update(
+                    (_pval(p), _profile) for p, adapter in _adapters.items()
+                    if _ledger_allowed(adapter)
+                )
             claimed = await asyncio.to_thread(
                 sweep_recoverable, None,
                 deliverable_platforms={platform for platform, _ in _deliverable_targets},
