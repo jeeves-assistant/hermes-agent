@@ -371,11 +371,16 @@ def decompose_task(
         logger.debug("decompose: auxiliary client import failed: %s", exc)
         return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
 
-    large_refactor_signals = _large_refactor_signals(task.title or "", task.body or "")
+    # Classify exactly the scope shown to the decomposer.  Classifying the
+    # unbounded body while only sending its first 4,000 characters can force a
+    # split for details the model never sees, producing an incomplete graph.
+    prompt_title = _truncate(task.title or "", 400)
+    prompt_body = _truncate(task.body or "(no body)", 4000)
+    large_refactor_signals = _large_refactor_signals(prompt_title, prompt_body)
     user_msg = _USER_TEMPLATE.format(
         task_id=task.id,
-        title=_truncate(task.title or "", 400),
-        body=_truncate(task.body or "(no body)", 4000),
+        title=prompt_title,
+        body=prompt_body,
         roster=_format_roster(roster),
         default_assignee=default_assignee,
         large_refactor_guard=_large_refactor_guard_text(large_refactor_signals),
