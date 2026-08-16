@@ -3545,7 +3545,7 @@ def decompose_triage_task(
     now = int(time.time())
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, branch_name, project_id "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
@@ -3603,6 +3603,7 @@ def _insert_decomposed_child(
     with no lock; leaving it unset makes dispatch materialize a fresh
     ``<repo>/.worktrees/<child-id>`` per child from the board anchor.
     """
+    new_id = _new_task_id()
     root_ws_kind = root_row["workspace_kind"] or "scratch"
     child_ws_kind = child.get("workspace_kind") or root_ws_kind
     if child.get("workspace_path"):
@@ -3613,21 +3614,58 @@ def _insert_decomposed_child(
         child_ws_path = root_row["workspace_path"]
     else:
         child_ws_path = None
-    new_id = _new_task_id()
+    child_project_id = root_row["project_id"]
+    child_branch_name = None
+    if child_project_id and child_ws_kind == "worktree":
+        from hermes_cli import projects_db as _pdb
+        root_path = Path(root_row["workspace_path"]) if root_row["workspace_path"] else None
+        project_repo = None
+        if (
+            root_path is not None and root_path.is_absolute()
+            and root_path.name == root_id and root_path.parent.name == ".worktrees"
+        ):
+            project_repo = str(root_path.parent.parent)
+        if project_repo and child_ws_path is None:
+            child_ws_path = os.path.join(project_repo, ".worktrees", new_id)
+        project_slug = None
+        root_branch_name = root_row["branch_name"]
+        if root_branch_name:
+            prefix, separator, leaf = root_branch_name.partition("/")
+            if separator and (leaf == root_id or leaf.startswith(f"{root_id}-")):
+                try:
+                    project_slug = _pdb.normalize_slug(prefix)
+                except ValueError:
+                    pass
+        if project_slug is None:
+            try:
+                project_slug = _pdb.normalize_slug(str(child_project_id))
+            except ValueError:
+                pass
+        if project_slug:
+            project_obj = _pdb.Project(
+                id=str(child_project_id), slug=project_slug, name=project_slug,
+                created_at=0, primary_path=project_repo,
+            )
+            child_branch_name = _pdb.branch_name_for(project_obj, new_id, title=child["title"])
     body = child.get("body")
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
-        " workspace_path, tenant, created_at, created_by) "
-        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        " workspace_path, branch_name, project_id, tenant, created_at, created_by) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?)",
         (
             new_id, child["title"].strip(), body if isinstance(body, str) else None,
             _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
-            root_row["tenant"], now, (author or "decomposer"),
+            child_branch_name, child_project_id, root_row["tenant"], now,
+            (author or "decomposer"),
         ),
     )
     _append_event(
-        conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id},
+        conn, new_id, "created", {
+            "by": author or "decomposer", "from_decompose_of": root_id,
+            "workspace_kind": child_ws_kind, "workspace_path": child_ws_path,
+            "branch_name": child_branch_name, "project_id": child_project_id,
+        },
     )
     _inherit_notify_subs(conn, new_id, (root_id,), created_at=now)
     return new_id
